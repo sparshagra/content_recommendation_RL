@@ -1,0 +1,43 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Byte-compiled
+*.pyc
+
+# Logs
+*.log
+baseline_results.log
+/tmp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Git
+*.orig
+
+# Local test outputs
+/outputs/
+*.tmp
+
+# Keep original README as backup only — not needed in repo root
+README_ORIGINAL.md

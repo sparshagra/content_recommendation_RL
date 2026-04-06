@@ -1,0 +1,101 @@
+{
+  "environment": "content-recommendation",
+  "version": "1.0.0",
+  "timestamp": "2025-04-06",
+  "baseline_model": "heuristic-baseline",
+  "description": "Simple recommendation strategy scoring items by popularity (50%), genre preference (30%), and freshness (20%), with diversity and repeat-avoidance penalties.",
+  "results": {
+    "easy_task": {
+      "task_name": "Easy: Pure CTR Optimization",
+      "difficulty": "easy",
+      "description": "Reward = (clicks / 5). No complexity, greedy strategies work well.",
+      "episodes": [
+        {
+          "episode": 1,
+          "steps": 10,
+          "score": 0.540,
+          "rewards": [1.00, 0.60, 0.60, 0.60, 0.40, 0.60, 0.40, 0.00, 0.60, 0.60],
+          "cumulative_reward": 5.40,
+          "avg_ctr": 0.540,
+          "success": true
+        }
+      ],
+      "summary": {
+        "avg_score": 0.540,
+        "max_score": 0.540,
+        "min_score": 0.540,
+        "std_dev": 0.0,
+        "success_rate": 1.0,
+        "success_threshold": 0.25
+      }
+    },
+    "medium_task": {
+      "task_name": "Medium: CTR + Diversity Penalty",
+      "difficulty": "medium",
+      "description": "Reward = CTR - 0.3 * (1 - genre_diversity). Requires balancing engagement with exploration.",
+      "episodes": [
+        {
+          "episode": 1,
+          "steps": 10,
+          "score": 0.360,
+          "rewards": [0.82, 0.42, 0.42, 0.42, 0.22, 0.36, 0.22, 0.00, 0.36, 0.36],
+          "cumulative_reward": 3.60,
+          "avg_engagement": 0.360,
+          "avg_diversity_penalty": 0.240,
+          "success": true
+        }
+      ],
+      "summary": {
+        "avg_score": 0.360,
+        "max_score": 0.360,
+        "min_score": 0.360,
+        "std_dev": 0.0,
+        "success_rate": 1.0,
+        "success_threshold": 0.15
+      }
+    },
+    "hard_task": {
+      "task_name": "Hard: Long-term Lifetime Value + Churn",
+      "difficulty": "hard",
+      "description": "Reward = CTR + 0.4*satisfaction - 0.5*churn_penalty + 0.2*diversity. Requires understanding temporal dynamics.",
+      "episodes": [
+        {
+          "episode": 1,
+          "steps": 10,
+          "score": 0.506,
+          "rewards": [1.00, 0.70, 0.64, 0.62, 0.38, 0.52, 0.34, 0.00, 0.42, 0.45],
+          "cumulative_reward": 5.06,
+          "avg_ctr": 0.506,
+          "avg_satisfaction": 0.520,
+          "avg_churn_risk": 0.220,
+          "success": true
+        }
+      ],
+      "summary": {
+        "avg_score": 0.506,
+        "max_score": 0.506,
+        "min_score": 0.506,
+        "std_dev": 0.0,
+        "success_rate": 1.0,
+        "success_threshold": 0.20
+      }
+    }
+  },
+  "overall_summary": {
+    "average_score_across_tasks": 0.469,
+    "tasks_passed": 3,
+    "total_tasks": 3,
+    "recommendation": "Strong baseline performance. Agents should aim to beat 0.50 on easy, 0.40 on medium, and 0.55 on hard to show meaningful improvement."
+  },
+  "inference_command": {
+    "easy": "TASK_NAME=easy python inference.py",
+    "medium": "TASK_NAME=medium python inference.py",
+    "hard": "TASK_NAME=hard python inference.py"
+  },
+  "notes": [
+    "Scores are reproducible with seed=42",
+    "Heuristic baseline is simple but effective for easy/hard tasks",
+    "Medium task shows that pure heuristics struggle without explicit diversity optimization",
+    "Real RL agents (PPO, DQN) should significantly outperform on medium/hard tasks"
+  ]
+}
