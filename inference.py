@@ -32,17 +32,21 @@ from content_rec_env import (
 # ENVIRONMENT CONFIGURATION — reads required hackathon env vars
 # ============================================================================
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
-HF_TOKEN     = os.getenv("HF_TOKEN", "")   # set via HF Spaces secret
-MODEL_NAME   = os.getenv("MODEL_NAME", "HuggingFaceH4/zephyr-7b-beta")
-TASK_NAME    = os.getenv("TASK_NAME", "easy")
-BENCHMARK    = os.getenv("BENCHMARK", "content-rec")
-MAX_STEPS    = 10  # steps per episode
+API_BASE_URL    = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
+HF_TOKEN        = os.getenv("HF_TOKEN", "")          # primary: HF Spaces secret
+OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")    # fallback: standard OpenAI key
+MODEL_NAME      = os.getenv("MODEL_NAME", "HuggingFaceH4/zephyr-7b-beta")
+TASK_NAME       = os.getenv("TASK_NAME", "easy")
+BENCHMARK       = os.getenv("BENCHMARK", "content-rec")
+MAX_STEPS       = 10  # steps per episode
 
-# Initialize OpenAI-compatible client pointing to HuggingFace Inference API
+# Resolve API key: HF_TOKEN > OPENAI_API_KEY > placeholder (avoids client crash)
+_api_key = HF_TOKEN or OPENAI_API_KEY or "no-key-set"
+
+# Initialize OpenAI-compatible client (works with HF Inference, OpenAI, etc.)
 client = OpenAI(
     base_url=API_BASE_URL,
-    api_key=HF_TOKEN,
+    api_key=_api_key,
 )
 
 # ============================================================================
