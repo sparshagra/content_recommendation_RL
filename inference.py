@@ -32,10 +32,12 @@ from content_rec_env import (
 # ENVIRONMENT CONFIGURATION — reads required hackathon env vars
 # ============================================================================
 
+# Required env vars — defaults only on API_BASE_URL and MODEL_NAME (NOT HF_TOKEN)
 API_BASE_URL    = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
-HF_TOKEN        = os.getenv("HF_TOKEN", "")          # primary: HF Spaces secret
-OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")    # fallback: standard OpenAI key
 MODEL_NAME      = os.getenv("MODEL_NAME", "HuggingFaceH4/zephyr-7b-beta")
+HF_TOKEN        = os.getenv("HF_TOKEN")          # NO default — must be set externally
+OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY")    # NO default — optional fallback
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") # Optional — for from_docker_image()
 TASK_NAME       = os.getenv("TASK_NAME", "easy")
 BENCHMARK       = os.getenv("BENCHMARK", "content-rec")
 MAX_STEPS       = 10  # steps per episode
@@ -43,7 +45,7 @@ MAX_STEPS       = 10  # steps per episode
 # Resolve API key: HF_TOKEN > OPENAI_API_KEY > placeholder (avoids client crash)
 _api_key = HF_TOKEN or OPENAI_API_KEY or "no-key-set"
 
-# Initialize OpenAI-compatible client (works with HF Inference, OpenAI, etc.)
+# Initialize OpenAI-compatible client pointing to HF Inference / OpenAI endpoint
 client = OpenAI(
     base_url=API_BASE_URL,
     api_key=_api_key,

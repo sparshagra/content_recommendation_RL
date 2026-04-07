@@ -1,0 +1,29 @@
+[project]
+name = "content-recommendation-openenv"
+version = "1.0.0"
+description = "Content Recommendation RL Environment — Meta × PyTorch OpenEnv Hackathon"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "dikshi2025" }]
+
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "openai>=1.0.0",
+    "numpy>=1.21.0",
+    "pyyaml>=6.0",
+    "httpx>=0.24.0",
+    "requests>=2.28.0",
+    "openenv-core>=0.2.0",
+]
+
+[project.scripts]
+server = "server.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["server"]

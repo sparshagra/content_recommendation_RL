@@ -241,9 +241,9 @@ def _info_to_reward_model(info: Optional[Dict]) -> RewardModel:
 
 @app.get("/health", response_model=HealthModel, summary="Liveness check")
 def health():
-    """Returns HTTP 200. Required by HF Spaces pre-submission checker."""
+    """Returns HTTP 200. Required by HF Spaces and openenv validate."""
     return HealthModel(
-        status="ok",
+        status="healthy",
         environment="content-recommendation",
         version="1.0.0",
     )
@@ -350,6 +350,33 @@ def episode_summary():
     )
 
 
+@app.get("/metadata", summary="Environment metadata")
+def metadata():
+    """Returns name and description. Required by openenv validate runtime check."""
+    return {
+        "name": "content-recommendation",
+        "description": (
+            "A real-world RL environment for content recommendation. "
+            "An agent recommends 5 items per step to simulated users and "
+            "receives reward signals based on click-through rate, diversity, "
+            "and long-term user retention."
+        ),
+        "version": "1.0.0",
+        "author": "dikshi2025",
+        "tasks": ["easy", "medium", "hard"],
+    }
+
+
+@app.get("/schema", summary="Action, observation, and state schemas")
+def schema():
+    """Returns JSON schemas for action, observation, and state. Required by openenv validate."""
+    return {
+        "action": ActionModel.model_json_schema(),
+        "observation": ObservationModel.model_json_schema(),
+        "state": UserStateModel.model_json_schema(),
+    }
+
+
 @app.get("/", summary="API root")
 def root():
     return {
@@ -358,6 +385,8 @@ def root():
         "openenv_spec": True,
         "endpoints": {
             "health": "GET /health",
+            "metadata": "GET /metadata",
+            "schema": "GET /schema",
             "reset": "POST /reset",
             "step": "POST /step",
             "state": "GET /state",
