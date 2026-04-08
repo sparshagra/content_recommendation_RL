@@ -24,7 +24,7 @@ COPY graders.py .
 
 # Required hackathon environment variables
 ENV PYTHONUNBUFFERED=1
-ENV TASK_NAME=easy
+ENV TASK_NAME=all
 ENV BENCHMARK=content-rec
 ENV MODEL_NAME=HuggingFaceH4/zephyr-7b-beta
 ENV API_BASE_URL=https://api-inference.huggingface.co/v1
