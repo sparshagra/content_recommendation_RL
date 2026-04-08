@@ -1,11 +1,11 @@
 """
 Content Recommendation Inference Script
 ========================================
-Baseline agent using LLM-guided recommendations via OpenAI-compatible API.
-Falls back to heuristic (popularity + user preference) if LLM is unavailable.
+Baseline agent using heuristic recommendations with optional LLM guidance
+via OpenAI-compatible API.
 
-STDOUT FORMAT: Follows OpenEnv specification
-  [START] task=<task_name> env=content-rec model=<model_name>
+STDOUT FORMAT: Follows OpenEnv specification strictly.
+  [START] task=<task_name> env=<env_name> model=<model_name>
   [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
   [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
@@ -32,40 +32,34 @@ from content_rec_env import (
 # ENVIRONMENT CONFIGURATION — reads required hackathon env vars
 # ============================================================================
 
-# Required env vars — defaults only on API_BASE_URL and MODEL_NAME (NOT HF_TOKEN)
 API_BASE_URL    = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
 MODEL_NAME      = os.getenv("MODEL_NAME", "HuggingFaceH4/zephyr-7b-beta")
-HF_TOKEN        = os.getenv("HF_TOKEN")          # NO default — must be set externally
-OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY")    # NO default — optional fallback
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") # Optional — for from_docker_image()
-TASK_NAME       = os.getenv("TASK_NAME", "easy")
+HF_TOKEN        = os.getenv("HF_TOKEN")           # Must be set externally
+API_KEY         = HF_TOKEN or os.getenv("OPENAI_API_KEY") or "no-key-set"
+
+TASK_NAME       = os.getenv("TASK_NAME", "all")
 BENCHMARK       = os.getenv("BENCHMARK", "content-rec")
-MAX_STEPS       = 10  # steps per episode
 
-# Resolve API key: HF_TOKEN > OPENAI_API_KEY > placeholder (avoids client crash)
-_api_key = HF_TOKEN or OPENAI_API_KEY or "no-key-set"
+MAX_STEPS             = 10    # steps per episode
+MAX_TOTAL_REWARD      = 10.0  # max possible cumulative reward (10 steps × max 1.0)
+SUCCESS_SCORE_THRESHOLD = 0.10  # normalized score threshold to call success
 
-# Initialize OpenAI-compatible client pointing to HF Inference / OpenAI endpoint
-client = OpenAI(
-    base_url=API_BASE_URL,
-    api_key=_api_key,
-)
 
 # ============================================================================
-# LOGGING HELPERS
+# LOGGING HELPERS  — must match exact format the evaluator expects
 # ============================================================================
 
 def log_start(task: str, env: str, model: str) -> None:
-    """Emit [START] line"""
+    """Emit [START] line per OpenEnv spec."""
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
 def log_step(
     step: int, action: str, reward: float, done: bool, error: Optional[str]
 ) -> None:
-    """Emit [STEP] line"""
+    """Emit [STEP] line per OpenEnv spec."""
     error_val = error if error else "null"
-    done_val = str(done).lower()
+    done_val  = str(done).lower()
     print(
         f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
         flush=True,
@@ -73,7 +67,7 @@ def log_step(
 
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    """Emit [END] line"""
+    """Emit [END] line per OpenEnv spec."""
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
         f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
@@ -82,7 +76,7 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 
 
 # ============================================================================
-# HEURISTIC RECOMMENDATION AGENT (used as fallback)
+# HEURISTIC RECOMMENDATION AGENT
 # ============================================================================
 
 class HeuristicRecommender:
@@ -95,7 +89,9 @@ class HeuristicRecommender:
     def __init__(self, catalog: ContentCatalog):
         self.catalog = catalog
 
-    def recommend(self, user_state, last_recommendations: Optional[List[int]] = None) -> List[int]:
+    def recommend(
+        self, user_state, last_recommendations: Optional[List[int]] = None
+    ) -> List[int]:
         items = self.catalog.get_all()
         scores = []
 
@@ -104,9 +100,7 @@ class HeuristicRecommender:
             genre_pref = user_state.genre_preferences.get(item.genre, 0.5)
             freshness_bonus = 1.0 - min(item.freshness / 90.0, 1.0)
 
-            score = (
-                0.5 * popularity_score + 0.3 * genre_pref + 0.2 * freshness_bonus
-            )
+            score = 0.5 * popularity_score + 0.3 * genre_pref + 0.2 * freshness_bonus
 
             if user_state.interaction_history:
                 recent_genres = [
@@ -126,36 +120,34 @@ class HeuristicRecommender:
 
 
 # ============================================================================
-# LLM RECOMMENDATION AGENT (primary, with heuristic fallback)
+# LLM RECOMMENDATION AGENT (primary, heuristic fallback)
 # ============================================================================
 
 class LLMRecommender:
     """
-    Primary recommender that uses an LLM via OpenAI-compatible API.
-    Constructs a prompt from user state and asks the model to pick 5 item IDs.
+    Primary recommender: uses OpenAI-compatible API to pick 5 item IDs.
     Falls back to HeuristicRecommender on any failure.
     """
 
-    def __init__(self, catalog: ContentCatalog):
+    def __init__(self, client: OpenAI, catalog: ContentCatalog):
+        self.client = client
         self.catalog = catalog
         self.fallback = HeuristicRecommender(catalog)
 
     def _build_prompt(self, user_state, last_recommendations: Optional[List[int]]) -> str:
-        """Build a concise prompt for the LLM."""
         prefs = ", ".join(
             f"{g}={v:.2f}" for g, v in user_state.genre_preferences.items()
         )
-        history = user_state.interaction_history if user_state.interaction_history else ["none"]
-        last = last_recommendations if last_recommendations else ["none"]
+        history = user_state.interaction_history or ["none"]
+        last    = last_recommendations or ["none"]
 
-        # Give LLM a representative sample of items (top 50 by popularity) to reason about
         items = sorted(self.catalog.get_all(), key=lambda x: x.popularity, reverse=True)[:50]
         item_list = "\n".join(
             f"  id={it.item_id} genre={it.genre} popularity={it.popularity:.2f} freshness={it.freshness}d"
             for it in items
         )
 
-        prompt = f"""You are a content recommendation agent. Choose the best 5 item IDs to recommend.
+        return f"""You are a content recommendation agent. Choose the best 5 item IDs to recommend.
 
 User profile:
 - Genre preferences (0-1 scale): {prefs}
@@ -177,31 +169,24 @@ Rules:
 
 Respond with ONLY a JSON array of 5 integers, e.g.: [12, 45, 99, 201, 387]
 """
-        return prompt
 
     def _parse_response(self, text: str) -> Optional[List[int]]:
-        """Extract a list of 5 valid item IDs from LLM response text."""
-        # Try to find a JSON array in the response
         matches = re.findall(r'\[[\d,\s]+\]', text)
         for m in matches:
             try:
-                ids = json.loads(m)
-                ids = [int(x) for x in ids]
-                if (
-                    len(ids) == 5
-                    and len(set(ids)) == 5
-                    and all(0 <= i <= 499 for i in ids)
-                ):
+                ids = [int(x) for x in json.loads(m)]
+                if len(ids) == 5 and len(set(ids)) == 5 and all(0 <= i <= 499 for i in ids):
                     return ids
             except (json.JSONDecodeError, ValueError):
                 continue
         return None
 
-    def recommend(self, user_state, last_recommendations: Optional[List[int]] = None) -> List[int]:
-        """Try LLM first; fall back to heuristic on any error."""
+    def recommend(
+        self, user_state, last_recommendations: Optional[List[int]] = None
+    ) -> List[int]:
         try:
             prompt = self._build_prompt(user_state, last_recommendations)
-            response = client.chat.completions.create(
+            response = self.client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=[
                     {
@@ -214,39 +199,64 @@ Respond with ONLY a JSON array of 5 integers, e.g.: [12, 45, 99, 201, 387]
                 temperature=0.3,
             )
             text = response.choices[0].message.content.strip()
-            ids = self._parse_response(text)
+            ids  = self._parse_response(text)
             if ids is not None:
                 return ids
-            # Parsing failed → fallback
-            return self.fallback.recommend(user_state, last_recommendations)
-        except Exception:
-            # LLM unavailable or quota error → fallback silently
-            return self.fallback.recommend(user_state, last_recommendations)
+        except Exception as exc:
+            print(f"[DEBUG] Model request failed: {exc}", flush=True)
+        return self.fallback.recommend(user_state, last_recommendations)
 
 
 # ============================================================================
-# MAIN INFERENCE LOOP
+# SINGLE-TASK EPISODE RUNNER  (matches sample inference script pattern)
 # ============================================================================
 
-def run_episode(
-    env: ContentRecEnvSync,
-    recommender: LLMRecommender,
-    task_name: str,
-    seed: int = 42,
-) -> Dict:
-    """Run one episode with the LLM agent (heuristic fallback inside)."""
-    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+def _difficulty_for_task(task_name: str) -> TaskDifficulty:
+    t = task_name.lower()
+    if t in ("easy", "easy_task"):
+        return TaskDifficulty.EASY
+    if t in ("medium", "medium_task"):
+        return TaskDifficulty.MEDIUM
+    return TaskDifficulty.HARD
+
+
+def _canonical_task_name(task_name: str) -> str:
+    """Normalise task name to exactly match openenv.yaml task names."""
+    t = task_name.lower()
+    if t in ("easy", "easy_task"):
+        return "easy_task"
+    if t in ("medium", "medium_task"):
+        return "medium_task"
+    return "hard_task"
+
+
+def run_single_task(task_name: str, client: OpenAI) -> Dict:
+    """
+    Run one full episode for a single task and emit [START]/[STEP]/[END] logs.
+    Matches the sample inference script's log structure exactly.
+    """
+    canonical = _canonical_task_name(task_name)
+    difficulty = _difficulty_for_task(canonical)
+    catalog    = ContentCatalog(seed=42)
+    recommender = LLMRecommender(client, catalog)
+
+    history:  List[str]  = []
+    rewards:  List[float] = []
+    steps_taken = 0
+    score   = 0.0
+    success = False
+
+    log_start(task=canonical, env=BENCHMARK, model=MODEL_NAME)
+
+    env = ContentRecEnvSync(task_difficulty=difficulty, seed=42)
 
     try:
-        result = env.reset()
+        result     = env.reset()
         user_state = result.observation.user_state
-        last_action = None
+        last_action: Optional[List[int]] = None
+        last_reward = 0.0
 
-        rewards: List[float] = []
-        steps_taken = 0
-        error_msg = None
-
-        for step_num in range(1, MAX_STEPS + 1):
+        for step in range(1, MAX_STEPS + 1):
             if result.done:
                 break
 
@@ -255,97 +265,80 @@ def run_episode(
                 action = RecommendationAction(recommended_items=recommendations)
             except Exception as e:
                 error_msg = str(e)
-                log_step(
-                    step=step_num,
-                    action="error",
-                    reward=0.0,
-                    done=True,
-                    error=error_msg,
-                )
-                steps_taken = step_num
+                log_step(step=step, action="error", reward=0.0, done=True, error=error_msg)
+                steps_taken = step
                 break
 
-            result = env.step(action)
-            reward = result.reward
-            done = result.done
-            user_state = result.observation.user_state
+            result      = env.step(action)
+            reward      = result.reward
+            done        = result.done
+            user_state  = result.observation.user_state
 
             rewards.append(reward)
-            steps_taken = step_num
+            steps_taken = step
             last_action = recommendations
+            last_reward = reward
 
-            action_str = f"recommend({recommendations})"
-            log_step(step=step_num, action=action_str, reward=reward, done=done, error=None)
+            action_str = json.dumps(recommendations)
+            log_step(step=step, action=action_str, reward=reward, done=done, error=None)
+
+            history.append(f"Step {step}: {recommendations!r} -> reward {reward:+.2f}")
 
             if done:
                 break
 
-        avg_reward = sum(rewards) / len(rewards) if rewards else 0.0
-        score = avg_reward
-        success = score >= 0.1
+        score   = sum(rewards) / MAX_TOTAL_REWARD if MAX_TOTAL_REWARD > 0 else 0.0
+        score   = min(max(score, 0.0), 1.0)          # clamp to [0, 1]
+        success = score >= SUCCESS_SCORE_THRESHOLD
 
     except Exception as e:
-        error_msg = str(e)
-        print(f"[DEBUG] Episode error: {error_msg}", flush=True)
-        rewards = []
+        print(f"[DEBUG] Episode error: {e}", flush=True)
+        rewards     = []
         steps_taken = 0
-        score = 0.0
-        success = False
+        score       = 0.0
+        success     = False
 
     finally:
         try:
             env.close()
         except Exception as e:
-            print(f"[DEBUG] env.close() error: {e}", flush=True)
-
+            print(f"[DEBUG] env.close() error (container cleanup): {e}", flush=True)
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return {
-        "task": task_name,
-        "steps": steps_taken,
-        "score": score,
-        "avg_reward": sum(rewards) / len(rewards) if rewards else 0.0,
+        "task":         canonical,
+        "steps":        steps_taken,
+        "score":        score,
+        "avg_reward":   sum(rewards) / len(rewards) if rewards else 0.0,
         "total_reward": sum(rewards),
-        "num_rewards": len(rewards),
+        "success":      success,
     }
 
 
-def main():
-    """Main entry point — runs one or all tasks."""
-    task_str = TASK_NAME.lower()
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main() -> None:
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+    task_str = TASK_NAME.strip().lower()
 
     if task_str == "all":
-        # Run all three tasks for full grader coverage
-        all_tasks = [
-            ("easy", TaskDifficulty.EASY),
-            ("medium", TaskDifficulty.MEDIUM),
-            ("hard", TaskDifficulty.HARD),
-        ]
-        results = []
-        for name, difficulty in all_tasks:
-            env = ContentRecEnvSync(task_difficulty=difficulty, seed=42)
-            catalog = ContentCatalog(seed=42)
-            recommender = LLMRecommender(catalog)
-            result = run_episode(env, recommender, task_name=name, seed=42)
+        # Run all three tasks — each emits its own [START]/[STEP]/[END] block
+        all_tasks = ["easy_task", "medium_task", "hard_task"]
+        results   = []
+        for t in all_tasks:
+            result = run_single_task(t, client)
             results.append(result)
-            print(f"[DEBUG] {name} result: {json.dumps(result, indent=2)}", flush=True)
-        
-        overall_avg = sum(r["avg_reward"] for r in results) / len(results)
+            print(f"[DEBUG] {t} result: {json.dumps(result)}", flush=True)
+
+        overall_avg = sum(r["score"] for r in results) / len(results)
         print(f"[DEBUG] Overall average score: {overall_avg:.3f}", flush=True)
+
     else:
-        if task_str in ["easy", "easy_task"]:
-            task_difficulty = TaskDifficulty.EASY
-        elif task_str in ["medium", "medium_task"]:
-            task_difficulty = TaskDifficulty.MEDIUM
-        else:
-            task_difficulty = TaskDifficulty.HARD
-
-        env = ContentRecEnvSync(task_difficulty=task_difficulty, seed=42)
-        catalog = ContentCatalog(seed=42)
-        recommender = LLMRecommender(catalog)
-
-        result = run_episode(env, recommender, task_name=task_str, seed=42)
-        print(f"[DEBUG] Episode result: {json.dumps(result, indent=2)}", flush=True)
+        result = run_single_task(task_str, client)
+        print(f"[DEBUG] Episode result: {json.dumps(result)}", flush=True)
 
 
 if __name__ == "__main__":

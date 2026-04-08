@@ -100,6 +100,8 @@ tasks:
     evaluation_metric: average_ctr
     success_threshold: 0.25
     grader: graders.easy_task_grader
+    grader_id: easy_task
+    has_grader: true
     
   - name: medium_task
     description: |
@@ -112,6 +114,8 @@ tasks:
     evaluation_metric: engagement_minus_diversity_penalty
     success_threshold: 0.15
     grader: graders.medium_task_grader
+    grader_id: medium_task
+    has_grader: true
     
   - name: hard_task
     description: |
@@ -124,24 +128,29 @@ tasks:
     evaluation_metric: lifetime_value_with_churn
     success_threshold: 0.20
     grader: graders.hard_task_grader
+    grader_id: hard_task
+    has_grader: true
 
 # Graders — deterministic scoring functions for each task
 graders:
-  - task: easy_task
+  - id: easy_task
+    task: easy_task
     type: deterministic
-    logic: graders.easy_task_grader
+    function: graders.easy_task_grader
     score_range: [0.0, 1.0]
     description: "Scores agent on average CTR over the episode"
     
-  - task: medium_task
+  - id: medium_task
+    task: medium_task
     type: deterministic
-    logic: graders.medium_task_grader
+    function: graders.medium_task_grader
     score_range: [0.0, 1.0]
     description: "Scores agent on engagement minus diversity penalty"
     
-  - task: hard_task
+  - id: hard_task
+    task: hard_task
     type: deterministic
-    logic: graders.hard_task_grader
+    function: graders.hard_task_grader
     score_range: [0.0, 1.0]
     description: "Scores agent on lifetime value with churn prevention"
 
