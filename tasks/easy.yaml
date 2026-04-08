@@ -1,0 +1,18 @@
+task_id: "easy_task"
+description: "Pure CTR optimization. Reward = (number of clicked items) / 5. Stable, greedy strategies work well."
+max_steps: 10
+seed: 42
+difficulty: easy
+
+grader: graders.easy_task_grader
+has_grader: true
+success_threshold: 0.25
+score_range: [0.0, 1.0]
+metric: average_ctr
+
+grader_bounds:
+  max_score: 1.0
+  min_score: 0.0
+
+grader_weights:
+  ctr: 1.0

@@ -15,12 +15,8 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy environment code
-COPY content_rec_env.py .
-COPY inference.py .
-COPY openenv.yaml .
-COPY app.py .
-COPY graders.py .
+# Copy ALL project files (including server/, tasks/, graders.py, app.py, etc.)
+COPY . .
 
 # Required hackathon environment variables
 ENV PYTHONUNBUFFERED=1
@@ -33,5 +29,5 @@ ENV HF_TOKEN=""
 # Expose HF Spaces port
 EXPOSE 7860
 
-# Default: run FastAPI server (responds to /reset, /step, /state, /health)
+# Default: run FastAPI server (responds to /reset, /step, /state, /health, /tasks, /grade)
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]

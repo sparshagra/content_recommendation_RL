@@ -1,0 +1,21 @@
+task_id: "hard_task"
+description: "Long-term user lifetime value with churn prevention. Reward = CTR + 0.4*satisfaction - 0.5*churn + 0.2*diversity. Requires understanding long-term user dynamics."
+max_steps: 10
+seed: 42
+difficulty: hard
+
+grader: graders.hard_task_grader
+has_grader: true
+success_threshold: 0.20
+score_range: [0.0, 1.0]
+metric: lifetime_value_with_churn
+
+grader_bounds:
+  max_score: 1.0
+  min_score: 0.0
+
+grader_weights:
+  ctr: 1.0
+  satisfaction: 0.4
+  churn: 0.5
+  diversity: 0.2
