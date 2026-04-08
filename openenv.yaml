@@ -1,4 +1,10 @@
+spec_version: 1
 name: content-recommendation
+type: space
+runtime: fastapi
+app: app:app
+port: 7860
+
 description: |
   A realistic content recommendation environment where an RL agent learns to recommend
   items (articles, videos, songs) to users. The agent observes user preferences and 
