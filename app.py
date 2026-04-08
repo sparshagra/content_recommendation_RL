@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from content_rec_env import ContentRecEnv, RecommendationAction, TaskDifficulty
+from graders import easy_task_grader, medium_task_grader, hard_task_grader, grade_all
 
 # ---------------------------------------------------------------------------
 # App
@@ -160,6 +161,35 @@ class StepRequest(ActionModel):
 class ResetRequest(BaseModel):
     task: Optional[str] = Field(None, description="easy | medium | hard")
     seed: Optional[int] = Field(42, description="Random seed for reproducibility")
+
+
+class GradeRequest(BaseModel):
+    """POST /grade request body."""
+    task: str = Field(..., description="Task to grade: easy_task | medium_task | hard_task")
+    actions: List[List[int]] = Field(
+        ..., description="List of actions (each action is a list of 5 item IDs)"
+    )
+    seed: Optional[int] = Field(42, description="Random seed")
+
+
+class GradeAllRequest(BaseModel):
+    """POST /grade/all request body."""
+    actions: Dict[str, List[List[int]]] = Field(
+        ..., description="Dict mapping task name to list of actions"
+    )
+    seed: Optional[int] = Field(42, description="Random seed")
+
+
+class GradeResult(BaseModel):
+    """Grade result for a single task."""
+    task: str
+    score: float = Field(..., ge=0.0, le=1.0)
+    rewards: List[float]
+    steps: int
+    success: bool
+    metric: Optional[str] = None
+    success_threshold: Optional[float] = None
+    errors: List[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +393,30 @@ def metadata():
         ),
         "version": "1.0.0",
         "author": "dikshi2025",
-        "tasks": ["easy", "medium", "hard"],
+        "tasks": [
+            {
+                "name": "easy_task",
+                "difficulty": "easy",
+                "has_grader": True,
+                "grader": "graders.easy_task_grader",
+                "grader_type": "deterministic",
+            },
+            {
+                "name": "medium_task",
+                "difficulty": "medium",
+                "has_grader": True,
+                "grader": "graders.medium_task_grader",
+                "grader_type": "deterministic",
+            },
+            {
+                "name": "hard_task",
+                "difficulty": "hard",
+                "has_grader": True,
+                "grader": "graders.hard_task_grader",
+                "grader_type": "deterministic",
+            },
+        ],
+        "tasks_with_graders": 3,
     }
 
 
@@ -377,6 +430,87 @@ def schema():
     }
 
 
+@app.post("/grade", response_model=GradeResult, summary="Grade a task")
+def grade(req: GradeRequest):
+    """
+    Grade a sequence of agent actions for a specific task.
+    Returns deterministic score in [0.0, 1.0].
+    Required by OpenEnv Phase 2.
+    """
+    grader_map = {
+        "easy_task": easy_task_grader,
+        "easy": easy_task_grader,
+        "medium_task": medium_task_grader,
+        "medium": medium_task_grader,
+        "hard_task": hard_task_grader,
+        "hard": hard_task_grader,
+    }
+    task = req.task.lower()
+    grader_fn = grader_map.get(task)
+    if not grader_fn:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown task '{req.task}'. Must be one of: easy_task, medium_task, hard_task",
+        )
+    seed = req.seed if req.seed is not None else 42
+    result = grader_fn(req.actions, seed=seed)
+    return GradeResult(**result)
+
+
+@app.post("/grade/all", summary="Grade all tasks")
+def grade_all_endpoint(req: GradeAllRequest):
+    """
+    Grade agent actions for all tasks at once.
+    Returns per-task scores and an overall score.
+    """
+    seed = req.seed if req.seed is not None else 42
+    return grade_all(req.actions, seed=seed)
+
+
+@app.get("/tasks", summary="List all tasks with graders")
+def tasks():
+    """
+    Lists all available tasks and their grader status.
+    Required by OpenEnv Phase 2 evaluation.
+    """
+    return {
+        "tasks": [
+            {
+                "name": "easy_task",
+                "difficulty": "easy",
+                "description": "Pure CTR optimization",
+                "grader": "graders.easy_task_grader",
+                "grader_type": "deterministic",
+                "success_threshold": 0.25,
+                "score_range": [0.0, 1.0],
+                "has_grader": True,
+            },
+            {
+                "name": "medium_task",
+                "difficulty": "medium",
+                "description": "Engagement with diversity penalty",
+                "grader": "graders.medium_task_grader",
+                "grader_type": "deterministic",
+                "success_threshold": 0.15,
+                "score_range": [0.0, 1.0],
+                "has_grader": True,
+            },
+            {
+                "name": "hard_task",
+                "difficulty": "hard",
+                "description": "Long-term lifetime value with churn prevention",
+                "grader": "graders.hard_task_grader",
+                "grader_type": "deterministic",
+                "success_threshold": 0.20,
+                "score_range": [0.0, 1.0],
+                "has_grader": True,
+            },
+        ],
+        "total_tasks": 3,
+        "tasks_with_graders": 3,
+    }
+
+
 @app.get("/", summary="API root")
 def root():
     return {
@@ -387,10 +521,13 @@ def root():
             "health": "GET /health",
             "metadata": "GET /metadata",
             "schema": "GET /schema",
+            "tasks": "GET /tasks",
             "reset": "POST /reset",
             "step": "POST /step",
             "state": "GET /state",
             "catalog": "GET /catalog",
+            "grade": "POST /grade",
+            "grade_all": "POST /grade/all",
             "docs": "GET /docs",
         },
     }

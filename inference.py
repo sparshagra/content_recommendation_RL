@@ -311,21 +311,41 @@ def run_episode(
 
 
 def main():
-    """Main entry point"""
+    """Main entry point — runs one or all tasks."""
     task_str = TASK_NAME.lower()
-    if task_str in ["easy", "easy_task"]:
-        task_difficulty = TaskDifficulty.EASY
-    elif task_str in ["medium", "medium_task"]:
-        task_difficulty = TaskDifficulty.MEDIUM
+
+    if task_str == "all":
+        # Run all three tasks for full grader coverage
+        all_tasks = [
+            ("easy", TaskDifficulty.EASY),
+            ("medium", TaskDifficulty.MEDIUM),
+            ("hard", TaskDifficulty.HARD),
+        ]
+        results = []
+        for name, difficulty in all_tasks:
+            env = ContentRecEnvSync(task_difficulty=difficulty, seed=42)
+            catalog = ContentCatalog(seed=42)
+            recommender = LLMRecommender(catalog)
+            result = run_episode(env, recommender, task_name=name, seed=42)
+            results.append(result)
+            print(f"[DEBUG] {name} result: {json.dumps(result, indent=2)}", flush=True)
+        
+        overall_avg = sum(r["avg_reward"] for r in results) / len(results)
+        print(f"[DEBUG] Overall average score: {overall_avg:.3f}", flush=True)
     else:
-        task_difficulty = TaskDifficulty.HARD
+        if task_str in ["easy", "easy_task"]:
+            task_difficulty = TaskDifficulty.EASY
+        elif task_str in ["medium", "medium_task"]:
+            task_difficulty = TaskDifficulty.MEDIUM
+        else:
+            task_difficulty = TaskDifficulty.HARD
 
-    env = ContentRecEnvSync(task_difficulty=task_difficulty, seed=42)
-    catalog = ContentCatalog(seed=42)
-    recommender = LLMRecommender(catalog)
+        env = ContentRecEnvSync(task_difficulty=task_difficulty, seed=42)
+        catalog = ContentCatalog(seed=42)
+        recommender = LLMRecommender(catalog)
 
-    result = run_episode(env, recommender, task_name=task_str, seed=42)
-    print(f"[DEBUG] Episode result: {json.dumps(result, indent=2)}", flush=True)
+        result = run_episode(env, recommender, task_name=task_str, seed=42)
+        print(f"[DEBUG] Episode result: {json.dumps(result, indent=2)}", flush=True)
 
 
 if __name__ == "__main__":

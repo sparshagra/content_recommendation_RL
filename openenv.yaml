@@ -93,6 +93,7 @@ tasks:
     reward_function: content_rec_env.EasyReward
     evaluation_metric: average_ctr
     success_threshold: 0.25
+    grader: graders.easy_task_grader
     
   - name: medium_task
     description: |
@@ -104,6 +105,7 @@ tasks:
     reward_function: content_rec_env.MediumReward
     evaluation_metric: engagement_minus_diversity_penalty
     success_threshold: 0.15
+    grader: graders.medium_task_grader
     
   - name: hard_task
     description: |
@@ -115,6 +117,27 @@ tasks:
     reward_function: content_rec_env.HardReward
     evaluation_metric: lifetime_value_with_churn
     success_threshold: 0.20
+    grader: graders.hard_task_grader
+
+# Graders — deterministic scoring functions for each task
+graders:
+  - task: easy_task
+    type: deterministic
+    logic: graders.easy_task_grader
+    score_range: [0.0, 1.0]
+    description: "Scores agent on average CTR over the episode"
+    
+  - task: medium_task
+    type: deterministic
+    logic: graders.medium_task_grader
+    score_range: [0.0, 1.0]
+    description: "Scores agent on engagement minus diversity penalty"
+    
+  - task: hard_task
+    type: deterministic
+    logic: graders.hard_task_grader
+    score_range: [0.0, 1.0]
+    description: "Scores agent on lifetime value with churn prevention"
 
 # Simulation parameters
 simulation:

@@ -20,6 +20,7 @@ COPY content_rec_env.py .
 COPY inference.py .
 COPY openenv.yaml .
 COPY app.py .
+COPY graders.py .
 
 # Required hackathon environment variables
 ENV PYTHONUNBUFFERED=1
