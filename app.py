@@ -164,18 +164,18 @@ class ResetRequest(BaseModel):
 
 
 class GradeRequest(BaseModel):
-    """POST /grade request body."""
+    """POST /grade request body. actions is optional — if omitted, a deterministic self-play episode is run."""
     task: str = Field(..., description="Task to grade: easy_task | medium_task | hard_task")
-    actions: List[List[int]] = Field(
-        ..., description="List of actions (each action is a list of 5 item IDs)"
+    actions: Optional[List[List[int]]] = Field(
+        None, description="List of actions (each a list of 5 item IDs). If omitted, a deterministic episode is auto-run."
     )
     seed: Optional[int] = Field(42, description="Random seed")
 
 
 class GradeAllRequest(BaseModel):
-    """POST /grade/all request body."""
-    actions: Dict[str, List[List[int]]] = Field(
-        ..., description="Dict mapping task name to list of actions"
+    """POST /grade/all request body. actions is optional."""
+    actions: Optional[Dict[str, List[List[int]]]] = Field(
+        None, description="Dict mapping task name to list of actions. If omitted, all tasks are auto-graded."
     )
     seed: Optional[int] = Field(42, description="Random seed")
 
@@ -187,9 +187,12 @@ class GradeResult(BaseModel):
     rewards: List[float]
     steps: int
     success: bool
+    passed: bool = True
     metric: Optional[str] = None
     success_threshold: Optional[float] = None
     errors: List[str] = []
+    grader: Optional[str] = None
+    grader_type: str = "deterministic"
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +403,9 @@ def metadata():
                 "has_grader": True,
                 "grader": "graders.easy_task_grader",
                 "grader_type": "deterministic",
+                "grader_endpoint": "/grade/easy_task",
+                "success_threshold": 0.25,
+                "score_range": [0.0, 1.0],
             },
             {
                 "name": "medium_task",
@@ -407,6 +413,9 @@ def metadata():
                 "has_grader": True,
                 "grader": "graders.medium_task_grader",
                 "grader_type": "deterministic",
+                "grader_endpoint": "/grade/medium_task",
+                "success_threshold": 0.15,
+                "score_range": [0.0, 1.0],
             },
             {
                 "name": "hard_task",
@@ -414,9 +423,13 @@ def metadata():
                 "has_grader": True,
                 "grader": "graders.hard_task_grader",
                 "grader_type": "deterministic",
+                "grader_endpoint": "/grade/hard_task",
+                "success_threshold": 0.20,
+                "score_range": [0.0, 1.0],
             },
         ],
         "tasks_with_graders": 3,
+        "graders_endpoint": "/graders",
     }
 
 
@@ -430,41 +443,133 @@ def schema():
     }
 
 
+def _auto_actions(seed: int = 42) -> List[List[int]]:
+    """Generate a default set of 10 heuristic-quality actions for self-play grading."""
+    import random as _rnd
+    _rnd.seed(seed)
+    from content_rec_env import ContentCatalog
+    catalog = ContentCatalog(seed=seed)
+    items = catalog.get_all()
+    actions = []
+    for _ in range(10):
+        # pick 5 unique items with some score bias toward popular + fresh
+        pool = sorted(items, key=lambda x: x.popularity + (1 - x.freshness / 90) * 0.5, reverse=True)
+        chosen = pool[:20]
+        _rnd.shuffle(chosen)
+        ids = [it.item_id for it in chosen[:5]]
+        actions.append(ids)
+    return actions
+
+
 @app.post("/grade", response_model=GradeResult, summary="Grade a task")
 def grade(req: GradeRequest):
     """
     Grade a sequence of agent actions for a specific task.
     Returns deterministic score in [0.0, 1.0].
+    If no actions are provided, a deterministic self-play episode is auto-run.
     Required by OpenEnv Phase 2.
     """
     grader_map = {
-        "easy_task": easy_task_grader,
-        "easy": easy_task_grader,
-        "medium_task": medium_task_grader,
-        "medium": medium_task_grader,
-        "hard_task": hard_task_grader,
-        "hard": hard_task_grader,
+        "easy_task": (easy_task_grader, "graders.easy_task_grader"),
+        "easy": (easy_task_grader, "graders.easy_task_grader"),
+        "medium_task": (medium_task_grader, "graders.medium_task_grader"),
+        "medium": (medium_task_grader, "graders.medium_task_grader"),
+        "hard_task": (hard_task_grader, "graders.hard_task_grader"),
+        "hard": (hard_task_grader, "graders.hard_task_grader"),
     }
     task = req.task.lower()
-    grader_fn = grader_map.get(task)
-    if not grader_fn:
+    entry = grader_map.get(task)
+    if not entry:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown task '{req.task}'. Must be one of: easy_task, medium_task, hard_task",
         )
+    grader_fn, grader_ref = entry
     seed = req.seed if req.seed is not None else 42
-    result = grader_fn(req.actions, seed=seed)
+    # Use provided actions or auto-generate
+    actions = req.actions if req.actions else _auto_actions(seed=seed)
+    result = grader_fn(actions, seed=seed)
+    result["grader"] = grader_ref
+    result["grader_type"] = "deterministic"
+    result.setdefault("passed", result.get("passed", len(result.get("errors", [])) == 0))
     return GradeResult(**result)
 
 
+@app.get("/grade/{task_name}", response_model=GradeResult, summary="Grade a task (no body required)")
+def grade_get(task_name: str, seed: int = 42):
+    """
+    Grade a task via GET — runs a deterministic self-play episode automatically.
+    task_name: easy_task | medium_task | hard_task (or easy | medium | hard)
+    """
+    from pydantic import ValidationError
+    req = GradeRequest(task=task_name, actions=None, seed=seed)
+    return grade(req)
+
+
+@app.get("/graders", summary="List all task graders")
+def graders():
+    """
+    Lists all available grader functions and their task associations.
+    Required by OpenEnv Phase 2 grader discovery.
+    """
+    return {
+        "graders": [
+            {
+                "task": "easy_task",
+                "grader": "graders.easy_task_grader",
+                "grader_type": "deterministic",
+                "score_range": [0.0, 1.0],
+                "success_threshold": 0.25,
+                "metric": "average_ctr",
+                "callable": True,
+                "endpoint": "/grade/easy_task",
+            },
+            {
+                "task": "medium_task",
+                "grader": "graders.medium_task_grader",
+                "grader_type": "deterministic",
+                "score_range": [0.0, 1.0],
+                "success_threshold": 0.15,
+                "metric": "engagement_minus_diversity_penalty",
+                "callable": True,
+                "endpoint": "/grade/medium_task",
+            },
+            {
+                "task": "hard_task",
+                "grader": "graders.hard_task_grader",
+                "grader_type": "deterministic",
+                "score_range": [0.0, 1.0],
+                "success_threshold": 0.20,
+                "metric": "lifetime_value_with_churn",
+                "callable": True,
+                "endpoint": "/grade/hard_task",
+            },
+        ],
+        "total_graders": 3,
+        "graders_callable": True,
+    }
+
+
 @app.post("/grade/all", summary="Grade all tasks")
-def grade_all_endpoint(req: GradeAllRequest):
+def grade_all_endpoint(req: Optional[GradeAllRequest] = None):
     """
     Grade agent actions for all tasks at once.
     Returns per-task scores and an overall score.
+    If no actions provided, all tasks are auto-graded using self-play.
     """
-    seed = req.seed if req.seed is not None else 42
-    return grade_all(req.actions, seed=seed)
+    seed = (req.seed if req and req.seed is not None else 42)
+    if req and req.actions:
+        return grade_all(req.actions, seed=seed)
+    # Auto-grade all tasks
+    auto_actions = _auto_actions(seed=seed)
+    return grade_all(
+        {
+            "easy_task": auto_actions,
+            "medium_task": auto_actions,
+            "hard_task": auto_actions,
+        },
+        seed=seed,
+    )
 
 
 @app.get("/tasks", summary="List all tasks with graders")
@@ -481,6 +586,7 @@ def tasks():
                 "description": "Pure CTR optimization",
                 "grader": "graders.easy_task_grader",
                 "grader_type": "deterministic",
+                "grader_endpoint": "/grade/easy_task",
                 "success_threshold": 0.25,
                 "score_range": [0.0, 1.0],
                 "has_grader": True,
@@ -491,6 +597,7 @@ def tasks():
                 "description": "Engagement with diversity penalty",
                 "grader": "graders.medium_task_grader",
                 "grader_type": "deterministic",
+                "grader_endpoint": "/grade/medium_task",
                 "success_threshold": 0.15,
                 "score_range": [0.0, 1.0],
                 "has_grader": True,
@@ -501,6 +608,7 @@ def tasks():
                 "description": "Long-term lifetime value with churn prevention",
                 "grader": "graders.hard_task_grader",
                 "grader_type": "deterministic",
+                "grader_endpoint": "/grade/hard_task",
                 "success_threshold": 0.20,
                 "score_range": [0.0, 1.0],
                 "has_grader": True,
@@ -517,16 +625,19 @@ def root():
         "name": "Content Recommendation OpenEnv",
         "version": "1.0.0",
         "openenv_spec": True,
+        "tasks_with_graders": 3,
         "endpoints": {
             "health": "GET /health",
             "metadata": "GET /metadata",
             "schema": "GET /schema",
             "tasks": "GET /tasks",
+            "graders": "GET /graders",
             "reset": "POST /reset",
             "step": "POST /step",
             "state": "GET /state",
             "catalog": "GET /catalog",
             "grade": "POST /grade",
+            "grade_task": "GET /grade/{task_name}",
             "grade_all": "POST /grade/all",
             "docs": "GET /docs",
         },
