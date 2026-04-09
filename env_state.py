@@ -112,6 +112,7 @@ def obs_to_model(obs_dc) -> ObservationModel:
         fatigue=round(us.fatigue, 4),
         churn_risk=round(us.churn_risk, 4),
         session_step=us.session_step,
+        segment=getattr(us, "segment", "casual"),
     )
     items = [
         ItemSummaryModel(

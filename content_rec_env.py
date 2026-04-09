@@ -42,9 +42,22 @@ from datetime import datetime
 # ============================================================================
 
 class TaskDifficulty(Enum):
-    EASY = "easy"
+    EASY   = "easy"
     MEDIUM = "medium"
-    HARD = "hard"
+    HARD   = "hard"
+
+
+class UserSegment(Enum):
+    """
+    Behavioural user segments — each has distinct CTR sensitivity and churn dynamics.
+
+    CASUAL  — average engagement, standard fatigue recovery, low churn baseline
+    POWER   — high engagement, faster fatigue (discerning), minimal churn risk
+    CHURNER — already dissatisfied, narrow preferences, compounding churn risk
+    """
+    CASUAL  = "casual"
+    POWER   = "power"
+    CHURNER = "churner"
 
 
 @dataclass
@@ -61,15 +74,17 @@ class ContentItem:
 
 @dataclass
 class UserState:
-    """Represents a user's current state"""
-    user_id: int
-    session_id: int
-    interaction_history: List[int]  # last 5 items user clicked
-    genre_preferences: Dict[str, float]  # {genre: preference_score}
-    satisfaction: float  # cumulative session satisfaction (0-1)
-    fatigue: float  # content fatigue (0-1), resets per session
-    churn_risk: float  # probability of leaving (0-1)
-    session_step: int  # which step in session (1-10)
+    """Represents a user's current state within a recommendation session."""
+    user_id:              int
+    session_id:           int
+    interaction_history:  List[int]           # last 5 item IDs clicked
+    genre_preferences:    Dict[str, float]    # {genre: preference_score [0,1]}
+    satisfaction:         float               # session satisfaction (0–1)
+    fatigue:              float               # content fatigue (0–1), resets per session
+    churn_risk:           float               # probability of leaving (0–1)
+    session_step:         int                 # step number in current session
+    segment:              str = "casual"      # casual | power | churner
+    consecutive_low_sat:  int = 0             # steps with satisfaction < 0.3 (for churn spike)
 
 
 @dataclass
@@ -210,27 +225,58 @@ class UserSimulator:
         np.random.seed(seed)
     
     def generate_user(self, user_id: int) -> UserState:
-        """Create a new user with random preferences"""
-        # Assign 2-3 favorite genres per user
+        """
+        Create a new user with a randomly assigned behavioural segment and preferences.
+
+        Segments:
+          - casual  (50%): standard engagement, moderate preferences
+          - power   (30%): highly engaged, broad genre taste, low churn risk
+          - churner (20%): narrower preferences, already dissatisfied, high churn risk
+        """
+        segment_choice = random.choices(
+            [UserSegment.CASUAL, UserSegment.POWER, UserSegment.CHURNER],
+            weights=[5, 3, 2],
+        )[0]
+        segment = segment_choice.value
+
+        if segment == "power":
+            n_fav            = random.randint(3, 4)
+            high_pref_range  = (0.70, 1.00)
+            low_pref_range   = (0.20, 0.50)
+            init_satisfaction = 0.65
+            init_churn       = 0.05
+        elif segment == "churner":
+            n_fav            = random.randint(1, 2)
+            high_pref_range  = (0.50, 0.80)
+            low_pref_range   = (0.00, 0.20)
+            init_satisfaction = 0.30
+            init_churn       = 0.40
+        else:  # casual
+            n_fav            = random.randint(2, 3)
+            high_pref_range  = (0.60, 1.00)
+            low_pref_range   = (0.10, 0.40)
+            init_satisfaction = 0.50
+            init_churn       = 0.10
+
         all_genres = ContentCatalog.GENRES
-        fav_genres = random.sample(all_genres, k=random.randint(2, 3))
-        
-        genre_prefs = {}
-        for genre in all_genres:
-            if genre in fav_genres:
-                genre_prefs[genre] = random.uniform(0.6, 1.0)
-            else:
-                genre_prefs[genre] = random.uniform(0.1, 0.4)
-        
+        fav_genres = random.sample(all_genres, k=min(n_fav, len(all_genres)))
+        genre_prefs = {
+            g: random.uniform(*high_pref_range) if g in fav_genres
+               else random.uniform(*low_pref_range)
+            for g in all_genres
+        }
+
         return UserState(
             user_id=user_id,
-            session_id=random.randint(0, 1000000),
+            session_id=random.randint(0, 1_000_000),
             interaction_history=[],
             genre_preferences=genre_prefs,
-            satisfaction=0.5,
+            satisfaction=init_satisfaction,
             fatigue=0.0,
-            churn_risk=0.1,
+            churn_risk=init_churn,
             session_step=0,
+            segment=segment,
+            consecutive_low_sat=0,
         )
     
     def predict_clicks(
@@ -298,20 +344,38 @@ class UserSimulator:
         engagement: float,
         catalog: ContentCatalog,
     ) -> UserState:
-        """Update user state based on interaction"""
-        # Update interaction history
+        """
+        Update user state dynamics after a step.
+
+        Segment-specific behaviour:
+          - power users recover fatigue faster (broad tastes)
+          - churner users have compounding churn risk after 3+ consecutive bad steps
+        """
+        # Interaction history (last 5)
         user_state.interaction_history.extend(clicked_items)
         user_state.interaction_history = user_state.interaction_history[-5:]
-        
-        # Update satisfaction
+
+        # Satisfaction: exponential moving average
         user_state.satisfaction = 0.7 * user_state.satisfaction + 0.3 * engagement
-        
-        # Update churn risk (inversely related to satisfaction)
-        user_state.churn_risk = max(0.0, 0.15 + 0.7 * (1.0 - user_state.satisfaction))
-        
-        # Slight fatigue recovery
-        user_state.fatigue = max(0.0, user_state.fatigue - 0.05)
-        
+
+        # Consecutive low-satisfaction tracking (churner compounding)
+        if user_state.satisfaction < 0.3:
+            user_state.consecutive_low_sat += 1
+        else:
+            user_state.consecutive_low_sat = max(0, user_state.consecutive_low_sat - 1)
+
+        # Churn risk: base formula + segment-specific spike
+        base_churn = max(0.0, 0.15 + 0.7 * (1.0 - user_state.satisfaction))
+        if user_state.segment == "churner" and user_state.consecutive_low_sat >= 3:
+            base_churn = min(1.0, base_churn + 0.25)  # compounding churn spike
+        user_state.churn_risk = base_churn
+
+        # Fatigue recovery: power users recover faster
+        recovery = {"casual": 0.05, "power": 0.08, "churner": 0.03}.get(
+            user_state.segment, 0.05
+        )
+        user_state.fatigue = max(0.0, user_state.fatigue - recovery)
+
         return user_state
 
 

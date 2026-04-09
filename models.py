@@ -36,6 +36,7 @@ class UserStateModel(BaseModel):
     fatigue: float = Field(..., ge=0.0, le=1.0, description="Content fatigue level")
     churn_risk: float = Field(..., ge=0.0, le=1.0, description="Estimated churn probability")
     session_step: int = Field(..., description="Current step in session (0–max_steps)")
+    segment: str = Field("casual", description="User segment: casual | power | churner")
 
 
 class ItemSummaryModel(BaseModel):
