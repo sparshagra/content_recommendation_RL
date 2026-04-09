@@ -106,29 +106,63 @@ class StepResult:
 
 
 # ============================================================================
+# HELPERS
+# ============================================================================
+
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Cosine similarity between two equal-length vectors. Returns value in [-1, 1]."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(x * x for x in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _compute_user_pref_vector(user_state: "UserState", catalog: "ContentCatalog") -> List[float]:
+    """
+    Derive a 16-dim preference vector for the user.
+    If the user has interaction history, average the embeddings of clicked items.
+    Otherwise, fall back to a genre-weighted average over the full catalog.
+    """
+    if user_state.interaction_history:
+        vecs = [catalog.get_item(iid).embedding for iid in user_state.interaction_history]
+        return [sum(v[i] for v in vecs) / len(vecs) for i in range(16)]
+    # Fallback: genre-weighted centroid
+    total_weight = 0.0
+    weighted = [0.0] * 16
+    for item in catalog.get_all():
+        w = user_state.genre_preferences.get(item.genre, 0.0)
+        for i in range(16):
+            weighted[i] += w * item.embedding[i]
+        total_weight += w
+    if total_weight > 0:
+        return [v / total_weight for v in weighted]
+    return [0.0] * 16
+
+
+# ============================================================================
 # CONTENT & USER SIMULATORS
 # ============================================================================
 
 class ContentCatalog:
-    """Generates and manages a catalog of 500 content items"""
-    
+    """Generates and manages a catalog of 500 content items."""
+
     GENRES = ["pop", "tech", "sports", "entertainment", "news"]
-    
+
     def __init__(self, seed: int = 42):
         random.seed(seed)
         np.random.seed(seed)
         self.items = self._generate_items()
-    
+
     def _generate_items(self) -> List[ContentItem]:
         items = []
         for item_id in range(500):
             genre = random.choice(self.GENRES)
-            # Random 16-dim embedding
-            embedding = list(np.random.randn(16))
-            popularity = np.random.beta(2, 5)  # skewed towards lower (realistic)
-            freshness = random.randint(0, 90)  # 0-90 days old
-            duration = random.randint(300, 3600)  # 5 min to 1 hour
-            
+            embedding = list(np.random.randn(16))          # 16-dim semantic embedding
+            popularity = np.random.beta(2, 5)              # realistically skewed toward low
+            freshness = random.randint(0, 90)              # 0-90 days old
+            duration = random.randint(300, 3600)           # 5 min – 1 hour
             items.append(ContentItem(
                 item_id=item_id,
                 title=f"{genre.capitalize()} Content #{item_id}",
@@ -139,12 +173,33 @@ class ContentCatalog:
                 duration=duration,
             ))
         return items
-    
+
     def get_item(self, item_id: int) -> ContentItem:
         return self.items[item_id]
-    
+
     def get_all(self) -> List[ContentItem]:
         return self.items
+
+    def get_candidates(self, user_state: "UserState", k: int = 50) -> List[ContentItem]:
+        """
+        Candidate generation stage — returns the top-k most relevant items
+        for this user based on genre preference, popularity, and content freshness.
+
+        This mirrors the two-stage retrieve-then-rank pipeline used in production
+        recommendation systems (e.g. YouTube, TikTok). The agent ranks from this
+        shortlist rather than choosing from all 500 items blindly.
+        """
+        user_pref_vec = _compute_user_pref_vector(user_state, self)
+        scored = []
+        for item in self.items:
+            genre_score = user_state.genre_preferences.get(item.genre, 0.0)
+            freshness_score = 1.0 - min(item.freshness / 90.0, 1.0)
+            # Cosine similarity between item embedding and user preference vector
+            embed_score = (_cosine_similarity(item.embedding, user_pref_vec) + 1.0) / 2.0  # normalise to [0,1]
+            score = 0.4 * genre_score + 0.25 * item.popularity + 0.2 * freshness_score + 0.15 * embed_score
+            scored.append((item, score))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [item for item, _ in scored[:k]]
 
 
 class UserSimulator:
@@ -185,38 +240,54 @@ class UserSimulator:
         catalog: ContentCatalog,
     ) -> Tuple[List[int], float]:
         """
-        Simulate user clicking on recommendations.
+        Simulate user click behaviour using a multi-signal CTR model:
+          - Genre preference (user profile)
+          - Item popularity (base rate)
+          - Novelty (content freshness)
+          - Semantic similarity (embedding cosine sim with user preference vector)
+          - Fatigue penalty (repeated genre exposure)
+
         Returns: (clicked_item_ids, engagement_score)
         """
+        # Derive user's current preference vector from history / genre weights
+        user_pref_vec = _compute_user_pref_vector(user_state, catalog)
+
         clicked = []
         total_engagement = 0.0
-        
+
         for item_id in recommended_items:
             item = catalog.get_item(item_id)
-            
-            # Base CTR from genre preference + popularity
+
+            # Genre preference signal
             genre_pref = user_state.genre_preferences.get(item.genre, 0.5)
-            base_ctr = 0.3 + 0.3 * genre_pref + 0.2 * item.popularity
-            
-            # Novelty bonus: user prefers fresh content (inverse of freshness)
-            novelty_bonus = 0.1 * (1.0 - min(item.freshness / 90, 1.0))
-            
-            # Fatigue penalty: repeated genres lower CTR
+
+            # Semantic similarity signal — rewards embedding-based personalisation
+            raw_sim = _cosine_similarity(item.embedding, user_pref_vec)
+            embed_sim = (raw_sim + 1.0) / 2.0  # normalise [-1,1] → [0,1]
+
+            # Novelty bonus: fresh content gets a small lift
+            novelty_bonus = 0.08 * (1.0 - min(item.freshness / 90.0, 1.0))
+
+            # Fatigue penalty: stale genre exposure hurts CTR
             fatigue_penalty = user_state.fatigue * 0.15
-            
-            # Final CTR
-            ctr = max(0.0, base_ctr + novelty_bonus - fatigue_penalty)
-            
-            # User clicks with probability = ctr
+
+            # CTR = weighted combination of signals
+            base_ctr = (
+                0.25 * genre_pref
+                + 0.20 * item.popularity
+                + 0.15 * embed_sim
+                + novelty_bonus
+                + 0.25  # base click probability
+            )
+            ctr = max(0.0, base_ctr - fatigue_penalty)
+
             if random.random() < ctr:
                 clicked.append(item_id)
                 total_engagement += ctr
-                
-                # Update fatigue: same genre increases fatigue
-                user_state.fatigue = min(1.0, user_state.fatigue + 0.15)
-            
-            total_engagement += ctr * 0.1  # partial engagement even without click
-        
+                user_state.fatigue = min(1.0, user_state.fatigue + 0.12)
+
+            total_engagement += ctr * 0.08  # partial engagement even without click
+
         engagement = total_engagement / len(recommended_items)
         return clicked, engagement
     
@@ -317,8 +388,17 @@ class MediumReward(RewardFunction):
 
 
 class HardReward(RewardFunction):
-    """Task 3 (Hard): Long-term engagement + churn prevention"""
-    
+    """
+    Task 3 (Hard): Long-term user lifetime value with churn prevention.
+
+    Unlike the easy/medium tasks, this reward is NOT clipped at 0 — mild
+    negative rewards signal that the agent is actively harming long-term
+    retention. This provides a cleaner gradient for learning churn avoidance.
+
+    Reward = CTR + satisfaction_bonus - churn_penalty + diversity_bonus
+    Range  = [-0.3, 1.0]  (agent can do worse than zero by inciting churn)
+    """
+
     def compute(
         self,
         user_state: UserState,
@@ -328,21 +408,26 @@ class HardReward(RewardFunction):
         catalog: ContentCatalog,
     ) -> Tuple[float, Dict]:
         ctr = len(clicked_items) / len(recommended_items)
-        
-        # Long-term satisfaction bonus
+
+        # Long-term value: higher satisfaction means loyal returning user
         satisfaction_bonus = user_state.satisfaction * 0.4
-        
-        # Churn risk penalty: penalize high churn risk
+
+        # Churn penalty: high churn_risk means the user is about to leave
         churn_penalty = user_state.churn_risk * 0.5
-        
-        # Diversity: encourage exploring new genres to prevent fatigue
-        genres = [catalog.get_item(item_id).genre for item_id in recommended_items]
+
+        # Genre diversity prevents fatigue and keeps users engaged longer
+        genres = [catalog.get_item(iid).genre for iid in recommended_items]
         genre_diversity = len(set(genres)) / len(ContentCatalog.GENRES)
         diversity_bonus = genre_diversity * 0.2
-        
+
+        # Business-interpretable session value: good sessions = retained users
+        session_value = ctr * user_state.satisfaction * (1.0 - user_state.churn_risk)
+
         reward = ctr + satisfaction_bonus - churn_penalty + diversity_bonus
-        reward = max(0.0, min(1.0, reward))  # clip to [0, 1]
-        
+        # Allow mild negatives — this penalises strategies that maximise short-term
+        # CTR at the cost of user satisfaction (a real trade-off in production)
+        reward = max(-0.3, min(1.0, reward))
+
         return reward, {
             "ctr": ctr,
             "satisfaction_bonus": satisfaction_bonus,
@@ -350,6 +435,7 @@ class HardReward(RewardFunction):
             "diversity_bonus": diversity_bonus,
             "churn_risk": user_state.churn_risk,
             "satisfaction": user_state.satisfaction,
+            "session_value": round(session_value, 4),
             "task": "hard",
         }
 
@@ -369,57 +455,79 @@ class ContentRecEnv:
       - state() -> UserState
     """
     
+    # Variable episode lengths by difficulty — longer episodes expose temporal dynamics
+    MAX_STEPS_BY_DIFFICULTY = {
+        TaskDifficulty.EASY:   10,
+        TaskDifficulty.MEDIUM: 15,
+        TaskDifficulty.HARD:   20,
+    }
+    # Candidate list size — number of pre-filtered items shown per step
+    N_CANDIDATES = 50
+
     def __init__(self, task_difficulty: TaskDifficulty = TaskDifficulty.EASY, seed: int = 42):
         self.task_difficulty = task_difficulty
         self.seed = seed
         self.catalog = ContentCatalog(seed=seed)
         self.user_sim = UserSimulator(seed=seed)
-        
-        # Select reward function based on difficulty
+
+        # Reward function selected by difficulty
         if task_difficulty == TaskDifficulty.EASY:
             self.reward_fn = EasyReward()
         elif task_difficulty == TaskDifficulty.MEDIUM:
             self.reward_fn = MediumReward()
-        else:  # HARD
+        else:
             self.reward_fn = HardReward()
-        
+
         self.user_state: Optional[UserState] = None
         self.episode_rewards: List[float] = []
         self.episode_step: int = 0
-        self.max_steps = 10  # steps per session
+        self.max_steps: int = self.MAX_STEPS_BY_DIFFICULTY[task_difficulty]
     
     async def reset(self) -> StepResult:
-        """Reset environment for new episode"""
-        # Generate random user for this episode
+        """
+        Reset environment for a new episode.
+
+        Returns the initial observation with a pre-filtered candidate list
+        (top-50 items most relevant to this user) rather than the full 500-item
+        catalog. This mirrors the realistic two-stage retrieval-then-ranking
+        pipeline used in production recommender systems.
+        """
         user_id = random.randint(0, 999)
         self.user_state = self.user_sim.generate_user(user_id)
         self.episode_rewards = []
         self.episode_step = 0
-        
-        # Return initial observation
+
+        # Candidate generation: top-50 items for this user
+        candidates = self.catalog.get_candidates(self.user_state, k=self.N_CANDIDATES)
+
         obs = ContentRecObservation(
             user_state=self.user_state,
-            available_items=self.catalog.get_all(),
+            available_items=candidates,
             last_action=None,
             last_clicks=None,
             last_reward=0.0,
         )
-        
         return StepResult(observation=obs, reward=0.0, done=False)
     
     async def step(self, action: RecommendationAction) -> StepResult:
-        """Execute one step: agent recommends, user responds"""
+        """
+        Execute one MDP step: agent recommends → user responds → state updates.
+
+        The returned observation contains a freshly generated candidate list
+        (top-50 items re-ranked after the user state update) so the agent
+        sees how its recommendations shifted the user's preference signal.
+        """
         if self.user_state is None:
             raise RuntimeError("Must call reset() before step()")
-        
-        # Simulate user clicking
+
+        # Simulate user clicks with the multi-signal CTR model
         clicked_items, engagement = self.user_sim.predict_clicks(
             self.user_state,
             action.recommended_items,
             self.catalog,
         )
-        
-        # Compute reward
+
+        # Compute reward using the task-appropriate reward function
         reward, info = self.reward_fn.compute(
             self.user_state,
             action.recommended_items,
@@ -427,37 +535,41 @@ class ContentRecEnv:
             engagement,
             self.catalog,
         )
-        
-        # Update user state for next step
+
+        # Add session_value to all tasks (business metric)
+        if "session_value" not in info:
+            session_value = (
+                (len(clicked_items) / len(action.recommended_items))
+                * self.user_state.satisfaction
+                * (1.0 - self.user_state.churn_risk)
+            )
+            info["session_value"] = round(session_value, 4)
+
+        # Update user state dynamics
         self.user_state = self.user_sim.update_user_state(
             self.user_state,
             clicked_items,
             engagement,
             self.catalog,
         )
-        
+
         self.episode_step += 1
         self.user_state.session_step = self.episode_step
         self.episode_rewards.append(reward)
-        
-        # Check if episode is done
+
         done = self.episode_step >= self.max_steps
-        
-        # Create observation for next step
+
+        # Re-generate candidate list with updated user state
+        candidates = self.catalog.get_candidates(self.user_state, k=self.N_CANDIDATES)
+
         obs = ContentRecObservation(
             user_state=self.user_state,
-            available_items=self.catalog.get_all(),
+            available_items=candidates,
             last_action=action.recommended_items,
             last_clicks=clicked_items,
             last_reward=reward,
         )
-        
-        return StepResult(
-            observation=obs,
-            reward=reward,
-            done=done,
-            info=info,
-        )
+        return StepResult(observation=obs, reward=reward, done=done, info=info)
     
     async def close(self) -> None:
         """Clean up resources"""

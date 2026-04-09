@@ -52,7 +52,7 @@ class ObservationModel(BaseModel):
     """Typed observation returned by /reset and /step. OpenEnv spec compliant."""
     user_state: UserStateModel
     available_items: List[ItemSummaryModel] = Field(
-        ..., description="Catalog items available for recommendation"
+        ..., description="Top-50 candidate items pre-filtered for this user (embedding excluded)"
     )
     last_action: Optional[List[int]] = Field(
         None, description="Item IDs recommended in previous step (null on first step)"
