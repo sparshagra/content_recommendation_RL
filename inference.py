@@ -1,63 +1,62 @@
 """
 Content Recommendation Inference Script
 ========================================
-Baseline agent using heuristic recommendations with optional LLM guidance
-via OpenAI-compatible API.
+HTTP-based agent using the OpenEnv server API + LLM recommendations.
+Mirrors the advaya/OpenEnv evaluator expected pattern exactly:
+  1. GET  /health      — wait for server
+  2. POST /reset       — start episode, get session_id
+  3. POST /step (x N)  — step through episode
+  4. GET  /grader      — score the episode via server grader
+  5. Log  [START] / [STEP] / [END] per OpenEnv spec
 
-STDOUT FORMAT: Follows OpenEnv specification strictly.
+STDOUT FORMAT:
   [START] task=<task_name> env=<env_name> model=<model_name>
   [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-  [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
+  [END]   task=<task> success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...>
 """
 
-import asyncio
 import os
 import sys
+import time
 import json
 import re
+import requests
 from typing import List, Optional, Dict
 
 from openai import OpenAI
 
-# Import environment
-from content_rec_env import (
-    ContentRecEnv,
-    ContentRecEnvSync,
-    RecommendationAction,
-    TaskDifficulty,
-    ContentCatalog,
-)
+# Keep ContentCatalog import for building LLM/heuristic prompts locally
+from content_rec_env import ContentCatalog
 
 # ============================================================================
-# ENVIRONMENT CONFIGURATION — reads required hackathon env vars
+# CONFIGURATION — reads required hackathon env vars
 # ============================================================================
 
-API_BASE_URL    = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
-MODEL_NAME      = os.getenv("MODEL_NAME", "HuggingFaceH4/zephyr-7b-beta")
-HF_TOKEN        = os.getenv("HF_TOKEN")           # Must be set externally
-API_KEY         = HF_TOKEN or os.getenv("OPENAI_API_KEY") or "no-key-set"
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
+MODEL_NAME   = os.getenv("MODEL_NAME", "HuggingFaceH4/zephyr-7b-beta")
+HF_TOKEN     = os.getenv("HF_TOKEN")
+API_KEY      = HF_TOKEN or os.getenv("OPENAI_API_KEY") or "no-key-set"
 
-TASK_NAME       = os.getenv("TASK_NAME", "all")
-BENCHMARK       = os.getenv("BENCHMARK", "content-rec")
+# ENV_API_URL is injected by the OpenEnv evaluator
+ENV_API_URL  = os.getenv("ENV_API_URL", "http://localhost:7860")
 
-MAX_STEPS             = 10    # steps per episode
-MAX_TOTAL_REWARD      = 10.0  # max possible cumulative reward (10 steps × max 1.0)
-SUCCESS_SCORE_THRESHOLD = 0.10  # normalized score threshold to call success
+TASK_NAME    = os.getenv("TASK_NAME", "all")
+BENCHMARK    = os.getenv("BENCHMARK", "content-rec")
+
+MAX_STEPS             = 10
+MAX_TOTAL_REWARD      = 10.0
+SUCCESS_SCORE_THRESHOLD = 0.10
 
 
 # ============================================================================
-# LOGGING HELPERS  — must match exact format the evaluator expects
+# LOGGING HELPERS — must match exact format the evaluator expects
 # ============================================================================
 
 def log_start(task: str, env: str, model: str) -> None:
-    """Emit [START] line per OpenEnv spec."""
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
-def log_step(
-    step: int, action: str, reward: float, done: bool, error: Optional[str]
-) -> None:
-    """Emit [STEP] line per OpenEnv spec."""
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
     error_val = error if error else "null"
     done_val  = str(done).lower()
     print(
@@ -66,13 +65,30 @@ def log_step(
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    """Emit [END] line per OpenEnv spec."""
+def log_end(task: str, success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        f"[END] task={task} success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
         flush=True,
     )
+
+
+# ============================================================================
+# USER STATE PROXY — adapts HTTP observation dict to an object for recommenders
+# ============================================================================
+
+class _UserStateProxy:
+    """Wraps the observation dict returned by /reset and /step into an object."""
+    def __init__(self, obs_data: dict):
+        us = obs_data.get("user_state", obs_data)
+        self.user_id             = us.get("user_id", 0)
+        self.session_id          = us.get("session_id", 0)
+        self.interaction_history = us.get("interaction_history", [])
+        self.genre_preferences   = us.get("genre_preferences", {})
+        self.satisfaction        = float(us.get("satisfaction", 0.5))
+        self.fatigue             = float(us.get("fatigue", 0.0))
+        self.churn_risk          = float(us.get("churn_risk", 0.1))
+        self.session_step        = us.get("session_step", 0)
 
 
 # ============================================================================
@@ -83,14 +99,13 @@ class HeuristicRecommender:
     """
     Fallback recommendation strategy:
     score(item) = 0.5 * popularity + 0.3 * genre_preference + 0.2 * freshness_bonus
-    Penalties for repeated genres and recent recommendations.
     """
 
     def __init__(self, catalog: ContentCatalog):
         self.catalog = catalog
 
     def recommend(
-        self, user_state, last_recommendations: Optional[List[int]] = None
+        self, user_state: _UserStateProxy, last_recommendations: Optional[List[int]] = None
     ) -> List[int]:
         items = self.catalog.get_all()
         scores = []
@@ -130,11 +145,11 @@ class LLMRecommender:
     """
 
     def __init__(self, client: OpenAI, catalog: ContentCatalog):
-        self.client = client
-        self.catalog = catalog
+        self.client   = client
+        self.catalog  = catalog
         self.fallback = HeuristicRecommender(catalog)
 
-    def _build_prompt(self, user_state, last_recommendations: Optional[List[int]]) -> str:
+    def _build_prompt(self, user_state: _UserStateProxy, last_recommendations: Optional[List[int]]) -> str:
         prefs = ", ".join(
             f"{g}={v:.2f}" for g, v in user_state.genre_preferences.items()
         )
@@ -182,7 +197,7 @@ Respond with ONLY a JSON array of 5 integers, e.g.: [12, 45, 99, 201, 387]
         return None
 
     def recommend(
-        self, user_state, last_recommendations: Optional[List[int]] = None
+        self, user_state: _UserStateProxy, last_recommendations: Optional[List[int]] = None
     ) -> List[int]:
         try:
             prompt = self._build_prompt(user_state, last_recommendations)
@@ -208,20 +223,11 @@ Respond with ONLY a JSON array of 5 integers, e.g.: [12, 45, 99, 201, 387]
 
 
 # ============================================================================
-# SINGLE-TASK EPISODE RUNNER  (matches sample inference script pattern)
+# HELPERS
 # ============================================================================
 
-def _difficulty_for_task(task_name: str) -> TaskDifficulty:
-    t = task_name.lower()
-    if t in ("easy", "easy_task"):
-        return TaskDifficulty.EASY
-    if t in ("medium", "medium_task"):
-        return TaskDifficulty.MEDIUM
-    return TaskDifficulty.HARD
-
-
 def _canonical_task_name(task_name: str) -> str:
-    """Normalise task name to exactly match openenv.yaml task names."""
+    """Normalise to exactly match openenv.yaml task IDs."""
     t = task_name.lower()
     if t in ("easy", "easy_task"):
         return "easy_task"
@@ -230,80 +236,133 @@ def _canonical_task_name(task_name: str) -> str:
     return "hard_task"
 
 
+def _wait_for_server(max_retries: int = 20, delay: int = 3) -> bool:
+    """Wait until the FastAPI server is live."""
+    print(f"# Waiting for environment at {ENV_API_URL}...", flush=True)
+    for i in range(max_retries):
+        try:
+            resp = requests.get(f"{ENV_API_URL}/health", timeout=3)
+            if resp.ok:
+                print(f"# Environment is LIVE at {ENV_API_URL}", flush=True)
+                return True
+        except Exception:
+            pass
+        print(f"# Waiting... ({i + 1}/{max_retries})", flush=True)
+        time.sleep(delay)
+    print(f"# WARNING: Server not ready after {max_retries} retries, proceeding anyway.", flush=True)
+    return False
+
+
+# ============================================================================
+# SINGLE-TASK EPISODE RUNNER — HTTP-based (mirrors advaya pattern)
+# ============================================================================
+
 def run_single_task(task_name: str, client: OpenAI) -> Dict:
     """
-    Run one full episode for a single task and emit [START]/[STEP]/[END] logs.
-    Matches the sample inference script's log structure exactly.
+    Run one full episode for a single task via HTTP API calls:
+      POST /reset → loop POST /step → GET /grader
+    Emits [START] / [STEP] / [END] per OpenEnv spec.
     """
-    canonical = _canonical_task_name(task_name)
-    difficulty = _difficulty_for_task(canonical)
-    catalog    = ContentCatalog(seed=42)
+    canonical   = _canonical_task_name(task_name)
+    # server expects short task name: "easy" / "medium" / "hard"
+    server_task = canonical.replace("_task", "")
+
+    catalog     = ContentCatalog(seed=42)
     recommender = LLMRecommender(client, catalog)
 
-    history:  List[str]  = []
-    rewards:  List[float] = []
-    steps_taken = 0
-    score   = 0.0
-    success = False
+    rewards:       List[float] = []
+    steps_taken:   int         = 0
+    score:         float       = 0.0
+    success:       bool        = False
+    session_id:    Optional[str] = None
 
     log_start(task=canonical, env=BENCHMARK, model=MODEL_NAME)
 
-    env = ContentRecEnvSync(task_difficulty=difficulty, seed=42)
-
     try:
-        result     = env.reset()
-        user_state = result.observation.user_state
-        last_action: Optional[List[int]] = None
-        last_reward = 0.0
+        # ── 1. Reset ──────────────────────────────────────────────────────
+        reset_res = requests.post(
+            f"{ENV_API_URL}/reset",
+            json={"task": server_task, "seed": 42},
+            timeout=30,
+        )
+        reset_res.raise_for_status()
 
+        data       = reset_res.json()
+        session_id = data.get("session_id", "default")
+        obs_data   = data.get("observation", {})
+        user_state = _UserStateProxy(obs_data)
+
+        last_recommendations: Optional[List[int]] = None
+        done = False
+
+        # ── 2. Step loop ──────────────────────────────────────────────────
         for step in range(1, MAX_STEPS + 1):
-            if result.done:
+            if done:
                 break
 
+            # Get action from LLM (or heuristic fallback)
             try:
-                recommendations = recommender.recommend(user_state, last_action)
-                action = RecommendationAction(recommended_items=recommendations)
+                recommendations = recommender.recommend(user_state, last_recommendations)
             except Exception as e:
-                error_msg = str(e)
-                log_step(step=step, action="error", reward=0.0, done=True, error=error_msg)
+                log_step(step=step, action="error", reward=0.0, done=True, error=str(e))
                 steps_taken = step
                 break
 
-            result      = env.step(action)
-            reward      = result.reward
-            done        = result.done
-            user_state  = result.observation.user_state
+            # Step via HTTP — pass session_id so server tracks actions for grader
+            step_res = requests.post(
+                f"{ENV_API_URL}/step",
+                json={"recommended_items": recommendations, "session_id": session_id},
+                timeout=15,
+            )
+
+            if step_res.status_code != 200:
+                err = f"HTTP_{step_res.status_code}"
+                log_step(step=step, action=str(recommendations), reward=0.0, done=True, error=err)
+                steps_taken = step
+                break
+
+            step_data  = step_res.json()
+            reward     = float(step_data.get("reward", 0.0))
+            done       = bool(step_data.get("done", False))
+            obs_data   = step_data.get("observation", obs_data)
+            user_state = _UserStateProxy(obs_data)
 
             rewards.append(reward)
-            steps_taken = step
-            last_action = recommendations
-            last_reward = reward
+            steps_taken        = step
+            last_recommendations = recommendations
 
             action_str = json.dumps(recommendations)
             log_step(step=step, action=action_str, reward=reward, done=done, error=None)
 
-            history.append(f"Step {step}: {recommendations!r} -> reward {reward:+.2f}")
+        # ── 3. Call grader via HTTP ───────────────────────────────────────
+        # This is the critical call the evaluator uses to detect "has grader"
+        try:
+            grader_res = requests.get(
+                f"{ENV_API_URL}/grader",
+                params={"session_id": session_id, "task": canonical},
+                timeout=15,
+            )
+            if grader_res.ok:
+                grader_data = grader_res.json()
+                score = float(grader_data.get("score", 0.0))
+                print(f"[DEBUG] Grader score for {canonical}: {score:.3f}", flush=True)
+            else:
+                print(f"[DEBUG] Grader returned HTTP {grader_res.status_code}", flush=True)
+                score = sum(rewards) / MAX_TOTAL_REWARD if rewards else 0.0
+        except Exception as e:
+            print(f"[DEBUG] Grader call failed: {e}", flush=True)
+            score = sum(rewards) / MAX_TOTAL_REWARD if rewards else 0.0
 
-            if done:
-                break
-
-        score   = sum(rewards) / MAX_TOTAL_REWARD if MAX_TOTAL_REWARD > 0 else 0.0
-        score   = min(max(score, 0.0), 1.0)          # clamp to [0, 1]
+        score   = min(max(score, 0.0), 1.0)
         success = score >= SUCCESS_SCORE_THRESHOLD
 
     except Exception as e:
-        print(f"[DEBUG] Episode error: {e}", flush=True)
-        rewards     = []
-        steps_taken = 0
-        score       = 0.0
-        success     = False
+        print(f"[DEBUG] Episode error for {canonical}: {e}", flush=True)
+        score   = 0.0
+        success = False
 
     finally:
-        try:
-            env.close()
-        except Exception as e:
-            print(f"[DEBUG] env.close() error (container cleanup): {e}", flush=True)
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        log_end(task=canonical, success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return {
         "task":         canonical,
@@ -321,6 +380,9 @@ def run_single_task(task_name: str, client: OpenAI) -> Dict:
 
 def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+    # Wait for the FastAPI server to be ready before running tasks
+    _wait_for_server()
 
     task_str = TASK_NAME.strip().lower()
 

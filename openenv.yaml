@@ -9,13 +9,19 @@ tasks:
     difficulty: "easy"
     description: "Pure CTR optimization. Reward = clicks / 5. Stable, greedy strategies work."
     config_path: "tasks/easy.yaml"
+    has_grader: true
+    grader: graders.easy_task_grader
 
   - id: "medium_task"
     difficulty: "medium"
     description: "Engagement with content diversity penalty. Requires balancing CTR vs. exploration."
     config_path: "tasks/medium.yaml"
+    has_grader: true
+    grader: graders.medium_task_grader
 
   - id: "hard_task"
     difficulty: "hard"
     description: "Long-term user lifetime value with churn prevention. Requires understanding long-term user dynamics."
     config_path: "tasks/hard.yaml"
+    has_grader: true
+    grader: graders.hard_task_grader

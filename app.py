@@ -16,6 +16,7 @@ All response models are typed Pydantic models per OpenEnv specification.
 """
 
 import os
+import uuid
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
@@ -125,6 +126,7 @@ class ResetResponseModel(BaseModel):
     reward: float = Field(0.0, ge=0.0, le=1.0)
     done: bool = False
     task: str = Field(..., description="Active task: easy | medium | hard")
+    session_id: str = Field("", description="Session ID — pass to /grader to score this episode")
 
 
 class StepResponseModel(BaseModel):
@@ -154,8 +156,8 @@ class EpisodeSummaryModel(BaseModel):
 # ---------------------------------------------------------------------------
 
 class StepRequest(ActionModel):
-    """POST /step request body — extends ActionModel."""
-    pass
+    """POST /step request body — extends ActionModel with optional session_id."""
+    session_id: Optional[str] = Field(None, description="Session ID from /reset (optional)")
 
 
 class ResetRequest(BaseModel):
@@ -200,6 +202,14 @@ class GradeResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 TASK_NAME = os.getenv("TASK_NAME", "easy").lower()
+
+# ---------------------------------------------------------------------------
+# Session tracking — mirrors advaya's session-based grader architecture
+# ---------------------------------------------------------------------------
+
+SESSIONS: Dict[str, ContentRecEnv] = {}      # session_id → env
+SESSION_TASKS: Dict[str, str] = {}           # session_id → task name
+SESSION_ACTIONS: Dict[str, List[List[int]]] = {}  # session_id → list of actions taken
 
 
 def _get_difficulty(task: str) -> TaskDifficulty:
@@ -285,20 +295,30 @@ def health():
 @app.post("/reset", response_model=ResetResponseModel, summary="Reset environment")
 async def reset(req: ResetRequest = ResetRequest()):
     """
-    Reset environment for a new episode. Returns the initial typed Observation.
-    Optionally specify `task` (easy/medium/hard) and `seed`.
+    Reset environment for a new episode. Returns the initial typed Observation
+    and a session_id for use with /step and /grader.
     """
     global _env
     difficulty = _get_difficulty(req.task or TASK_NAME)
     seed = req.seed if req.seed is not None else 42
-    _env = ContentRecEnv(task_difficulty=difficulty, seed=seed)
-    result = await _env.reset()
+    new_env = ContentRecEnv(task_difficulty=difficulty, seed=seed)
+    result = await new_env.reset()
+
+    # Create a session so /grader can score the completed episode
+    session_id = str(uuid.uuid4())
+    SESSIONS[session_id] = new_env
+    SESSION_TASKS[session_id] = (req.task or TASK_NAME).lower()
+    SESSION_ACTIONS[session_id] = []
+
+    # Also update the global env for backward compat
+    _env = new_env
 
     return ResetResponseModel(
         observation=_obs_to_model(result.observation),
         reward=result.reward,
         done=result.done,
         task=difficulty.value,
+        session_id=session_id,
     )
 
 
@@ -307,13 +327,21 @@ async def step(req: StepRequest):
     """
     Submit a recommendation action (5 item IDs). Returns next Observation,
     Reward [0.0-1.0], done flag, and typed reward breakdown.
+    Uses session_id if provided, otherwise falls back to global env.
     """
+    # Resolve which env to use
+    env_to_use = _env
+    if req.session_id and req.session_id in SESSIONS:
+        env_to_use = SESSIONS[req.session_id]
+        # Record the action for grading later
+        SESSION_ACTIONS[req.session_id].append(req.recommended_items)
+
     try:
         action = RecommendationAction(recommended_items=req.recommended_items)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     try:
-        result = await _env.step(action)
+        result = await env_to_use.step(action)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -504,6 +532,40 @@ def grade_get(task_name: str, seed: int = 42):
     from pydantic import ValidationError
     req = GradeRequest(task=task_name, actions=None, seed=seed)
     return grade(req)
+
+
+@app.get("/grader", summary="Grade a completed session (session-based grader endpoint)")
+def grader_session(
+    session_id: str = None,
+    task: str = None,
+):
+    """
+    Session-based grader — called by inference.py after each episode.
+    Matches the advaya/OpenEnv evaluator's expected grader pattern.
+    Grades the actual actions taken in the session (or runs a deterministic
+    episode if no session is found).
+    """
+    # Resolve task name
+    task_name = task or TASK_NAME
+    if session_id and session_id in SESSION_TASKS:
+        task_name = SESSION_TASKS[session_id]
+
+    grader_map = {
+        "easy": easy_task_grader,       "easy_task": easy_task_grader,
+        "medium": medium_task_grader,   "medium_task": medium_task_grader,
+        "hard": hard_task_grader,       "hard_task": hard_task_grader,
+    }
+    grader_fn = grader_map.get((task_name or "easy").lower(), easy_task_grader)
+
+    # Grade the actual session actions if available
+    actions = None
+    if session_id and session_id in SESSION_ACTIONS and SESSION_ACTIONS[session_id]:
+        actions = SESSION_ACTIONS[session_id]
+
+    result = grader_fn(actions=actions)
+    result["session_id"] = session_id
+    result["grader_type"] = "deterministic"
+    return result
 
 
 @app.get("/graders", summary="List all task graders")
