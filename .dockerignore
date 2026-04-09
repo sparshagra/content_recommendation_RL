@@ -1,0 +1,17 @@
+# .dockerignore — keep the Docker image lean
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.gitignore
+.gitattributes
+docs/
+scripts/
+examples/
+tests/
+*.md
+*.svg
+*.sh
+*.txt
+!requirements.txt

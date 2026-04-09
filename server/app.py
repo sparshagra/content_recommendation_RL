@@ -1,22 +1,15 @@
 """
-Content Recommendation OpenEnv — Server Entry Point
-====================================================
-Required by openenv validate: server/app.py with main() function.
-This module starts the FastAPI server via uvicorn.
+server/app.py — OpenEnv server entry point shim.
+Imports the FastAPI app from the root app module.
+No sys.path hacks needed: the Dockerfile sets WORKDIR /app and copies everything there.
 """
 
-import sys
-import os
-
-# Add parent directory to path so we can import from root
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app import app  # noqa: F401 — re-exported for OpenEnv server discovery
 
 
 def main(host: str = "0.0.0.0", port: int = 7860) -> None:
-    """Start the OpenEnv HTTP server."""
+    """Start the OpenEnv HTTP server via uvicorn."""
     import uvicorn
-
-    # Import the FastAPI app from root
     uvicorn.run("app:app", host=host, port=port, log_level="info")
 
 

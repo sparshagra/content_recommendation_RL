@@ -1,256 +1,185 @@
----
-title: Content Recommendation OpenEnv
-emoji: 🎯
-colorFrom: purple
-colorTo: indigo
-sdk: docker
-app_port: 7860
-pinned: false
-license: mit
-tags:
-  - reinforcement-learning
-  - openenv
-  - content-recommendation
-  - rl-environment
-  - meta-pytorch-hackathon
-  - recommendation-system
----
+# Content Recommendation OpenEnv
 
-# 🎯 Content Recommendation — OpenEnv RL Environment
+> **Meta × PyTorch OpenEnv Hackathon 2026** — A production-quality RL environment for content recommendation.
 
-> **Meta × PyTorch OpenEnv Hackathon** submission by [@dikshi2025](https://huggingface.co/dikshi2025)
+An agent learns to recommend content (articles, videos, songs) to simulated users over multi-step sessions. Reward signals cover click-through rate, content diversity, and long-term user retention — three real metrics used by recommendation teams at scale.
 
-A **production-grade reinforcement learning environment** where an AI agent learns to recommend content (articles, videos, songs) to simulated users — optimising for engagement, diversity, and long-term retention.
-
-Real-world relevance: **Netflix, YouTube, TikTok, Spotify** all solve exactly this problem.
+[![HF Space](https://img.shields.io/badge/🤗%20Space-dikshi2025%2Fcontent--rec-blue)](https://huggingface.co/spaces/dikshi2025/content-rec)
+[![OpenEnv](https://img.shields.io/badge/OpenEnv-compliant-green)](https://huggingface.co/spaces/dikshi2025/content-rec/blob/main/openenv.yaml)
 
 ---
 
-## 🚀 Try It Live
+## Environment Overview
 
-The environment exposes a REST API. No setup required — just call the endpoints below.
-
-### 1. Health Check
-```bash
-curl https://dikshi2025-content-rec.hf.space/health
-```
-```json
-{ "status": "ok", "environment": "content-recommendation", "version": "1.0.0" }
-```
-
-### 2. Start a New Episode
-```bash
-curl -X POST https://dikshi2025-content-rec.hf.space/reset \
-  -H "Content-Type: application/json" \
-  -d '{"task": "easy", "seed": 42}'
-```
-
-### 3. Take a Step (Recommend 5 Items)
-```bash
-curl -X POST https://dikshi2025-content-rec.hf.space/step \
-  -H "Content-Type: application/json" \
-  -d '{"recommended_items": [42, 101, 250, 388, 17]}'
-```
-
-### 4. Get Current User State
-```bash
-curl https://dikshi2025-content-rec.hf.space/state
-```
-
-📖 Full interactive API docs: [`/docs`](https://dikshi2025-content-rec.hf.space/docs)
-
----
-
-## 🧠 What This Environment Models
-
-A streaming platform session where:
-
-| Component | Description |
+| Property | Value |
 |---|---|
-| **Users** | 1,000 simulated users with genre preferences, fatigue, and churn risk |
-| **Content** | 500 items across 5 genres (pop, tech, sports, entertainment, news) |
-| **Agent** | Recommends 5 items per step, receives reward signal |
-| **Session** | 10 steps per episode, user state evolves over time |
+| **Action space** | 5 unique item IDs from catalog (0–499) |
+| **Observation** | User state + available items + last action/clicks |
+| **Reward** | Continuous [0.0, 1.0] — task-dependent |
+| **Episode length** | 10 steps |
+| **Tasks** | 3 (easy / medium / hard) |
+| **Graders** | 3 deterministic graders |
 
 ---
 
-## 📊 Three Difficulty Tasks
+## Tasks
 
-### 🟢 Task 1 — Easy: CTR Optimization
-Pure click-through rate. Greedy strategies work well.
-```
-reward = (items clicked) / 5          → range [0.0, 1.0]
-baseline score: ~0.54
-```
+| Task | Difficulty | Reward Signal | Goal |
+|---|---|---|---|
+| `easy_task` | Easy | CTR only | Maximise click-through rate |
+| `medium_task` | Medium | CTR − diversity penalty | Balance clicks with genre diversity |
+| `hard_task` | Hard | CTR + satisfaction − churn_risk + diversity | Prevent user churn while maximising long-term value |
 
-### 🟡 Task 2 — Medium: Engagement + Diversity
-Must balance clicks *and* genre diversity to avoid filter bubbles.
-```
-reward = CTR − 0.3 × (1 − genre_diversity)   → range [0.0, 1.0]
-baseline score: ~0.36
-```
+### Reward Formulas
 
-### 🔴 Task 3 — Hard: Long-term User Lifetime Value
-Models temporal dynamics: satisfaction, fatigue, and churn risk compound over steps.
+**Easy** — pure CTR:
 ```
-reward = CTR + 0.4×satisfaction − 0.5×churn_risk + 0.2×diversity
-baseline score: ~0.51
+reward = clicks / 5
 ```
 
-> All rewards are in **[0.0, 1.0]** with partial progress signals at every step.
+**Medium** — CTR with diversity requirement:
+```
+reward = CTR − 0.3 × (1 − genre_diversity)
+```
+
+**Hard** — lifetime value:
+```
+reward = CTR + 0.4 × satisfaction − 0.5 × churn_risk + 0.2 × diversity
+```
 
 ---
 
-## 🔄 API Reference
+## User Dynamics
+
+Each episode simulates a unique user with:
+- **Genre preferences** — 5 weighted scores (pop, tech, sports, entertainment, news)
+- **Interaction history** — last 5 clicked items
+- **Satisfaction** — moving average of engagement (decays without good recommendations)
+- **Fatigue** — rises when same genre is recommended repeatedly
+- **Churn risk** — inversely related to satisfaction; spikes with poor sessions
+
+---
+
+## API Reference
+
+The server exposes a standard OpenEnv HTTP API:
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/health` | Liveness check — returns HTTP 200 |
-| `POST` | `/reset` | Start new episode, choose task + seed |
-| `POST` | `/step` | Submit 5 item IDs, get reward + next state |
-| `GET` | `/state` | Current user state (no step taken) |
-| `GET` | `/episode_summary` | Cumulative episode metrics |
-| `GET` | `/docs` | Interactive Swagger UI |
-
-### Action Space
-```json
-{ "recommended_items": [42, 101, 250, 388, 17] }
-```
-- Exactly **5 unique item IDs**
-- IDs in range **[0, 499]**
-
-### Observation Space
-```json
-{
-  "user_state": {
-    "user_id": 731,
-    "genre_preferences": { "pop": 0.82, "tech": 0.21, "sports": 0.74, "entertainment": 0.55, "news": 0.13 },
-    "satisfaction": 0.62,
-    "fatigue": 0.15,
-    "churn_risk": 0.28,
-    "interaction_history": [42, 101, 17],
-    "session_step": 3
-  },
-  "last_clicks": [42, 17],
-  "last_reward": 0.60,
-  "done": false
-}
-```
+| `GET` | `/health` | Liveness check |
+| `GET` | `/metadata` | Environment metadata |
+| `GET` | `/schema` | Action / observation / state JSON schemas |
+| `GET` | `/tasks` | List all tasks with grader status |
+| `POST` | `/reset` | Start a new episode → returns observation + `session_id` |
+| `POST` | `/step` | Execute action → returns observation + reward |
+| `GET` | `/state` | Current user state (no side effects) |
+| `GET` | `/catalog` | Full 500-item catalog |
+| `GET` | `/graders` | List all graders |
+| `GET` | `/grader` | Grade a completed session (pass `session_id`) |
+| `POST` | `/grade` | Grade actions for a specific task |
+| `GET` | `/grade/{task}` | Grade via GET (self-play baseline) |
+| `POST` | `/grade/all` | Grade all three tasks at once |
+| `GET` | `/docs` | Swagger / OpenAPI UI |
 
 ---
 
-## 🤖 Baseline Agent
+## Quick Start
 
-The bundled `inference.py` uses **LLM-guided recommendations** (via `HuggingFaceH4/zephyr-7b-beta`) with an automatic heuristic fallback:
+### 1. Reset and step (HTTP)
 
+```python
+import requests
+
+BASE = "https://dikshi2025-content-rec.hf.space"
+
+# Start episode
+resp = requests.post(f"{BASE}/reset", json={"task": "easy"})
+session_id = resp.json()["session_id"]
+obs = resp.json()["observation"]
+
+# Step
+resp = requests.post(f"{BASE}/step", json={
+    "recommended_items": [0, 1, 2, 3, 4],
+    "session_id": session_id
+})
+print(resp.json()["reward"])
+
+# Grade
+resp = requests.get(f"{BASE}/grader", params={"session_id": session_id})
+print(resp.json()["score"])
 ```
-score(item) = 0.5 × popularity
-            + 0.3 × genre_preference_match
-            + 0.2 × freshness_bonus
-            − genre_repeat_penalty
-            − recent_recommendation_penalty
-```
 
-**Run locally:**
+### 2. Run inference
+
 ```bash
-# Set env vars
-export API_BASE_URL=https://api-inference.huggingface.co/v1
-export HF_TOKEN=your_hf_token
+export ENV_API_URL=https://dikshi2025-content-rec.hf.space
 export MODEL_NAME=HuggingFaceH4/zephyr-7b-beta
+export HF_TOKEN=<your_token>
+export TASK_NAME=all
 
-# Easy task
-TASK_NAME=easy python inference.py
-
-# Medium task
-TASK_NAME=medium python inference.py
-
-# Hard task
-TASK_NAME=hard python inference.py
+python inference.py
 ```
 
-Expected output:
-```
-[START] task=easy env=content-rec model=HuggingFaceH4/zephyr-7b-beta
-[STEP] step=1 action=recommend([294, 394, 149, 312, 58]) reward=1.00 done=false error=null
-[STEP] step=2 action=recommend([63, 80, 182, 303, 220]) reward=0.60 done=false error=null
-...
-[END] success=true steps=10 score=0.540 rewards=1.00,0.60,0.60,0.60,0.40,0.60,0.40,0.00,0.60,0.60
-```
-
----
-
-## 📁 File Structure
-
-```
-├── content_rec_env.py     # Core RL environment (reset/step/state + reward functions)
-├── inference.py           # Baseline agent (LLM + heuristic fallback)
-├── app.py                 # FastAPI server — exposes environment over HTTP
-├── openenv.yaml           # OpenEnv specification (tasks, action/obs space)
-├── Dockerfile             # Docker build for HF Spaces
-├── requirements.txt       # Python dependencies
-├── example_scores.json    # Reproducible baseline scores
-└── README.md              # Full technical documentation
-```
-
----
-
-## 🐳 Docker
+### 3. Run locally
 
 ```bash
-# Build
-docker build -t content-rec-env .
-
-# Run server (same as HF Spaces)
-docker run -p 7860:7860 \
-  -e HF_TOKEN=your_token \
-  -e TASK_NAME=easy \
-  content-rec-env
-
-# Verify
-curl localhost:7860/health
+pip install -r requirements.txt
+uvicorn app:app --port 7860
 ```
 
 ---
 
-## 📈 User Behaviour Model
+## Project Structure
 
-**Click probability per item:**
 ```
-base_ctr     = 0.30 + 0.30 × genre_preference + 0.20 × item_popularity
-novelty      = 0.10 × (1 − freshness/90)
-fatigue_pen  = user_fatigue × 0.15
-
-P(click)     = max(0, base_ctr + novelty − fatigue_pen)
-```
-
-**State evolution after each step:**
-```
-satisfaction = 0.7 × old_satisfaction + 0.3 × engagement
-churn_risk   = max(0, 0.15 + 0.7 × (1 − satisfaction))
-fatigue      = min(1, fatigue + 0.15) − 0.05   # builds up, slowly decays
+├── app.py               # FastAPI app factory (entry point)
+├── content_rec_env.py   # Core RL environment (MDP logic)
+├── graders.py           # Deterministic graders for all 3 tasks
+├── inference.py         # LLM agent runner (OpenEnv spec compliant)
+├── env_state.py         # Shared state and serialisation helpers
+├── models.py            # Pydantic models (OpenEnv spec typed)
+├── routes/
+│   ├── meta_routes.py      # /health, /metadata, /schema, /tasks
+│   ├── env_routes.py       # /reset, /step, /state, /catalog
+│   └── grader_routes.py    # /grader, /graders, /grade, /grade/all
+├── server/              # Server entry point shim
+├── tasks/               # Per-task YAML configs (grader refs)
+│   ├── easy.yaml
+│   ├── medium.yaml
+│   └── hard.yaml
+├── openenv.yaml         # OpenEnv spec declaration
+├── Dockerfile           # Container build
+├── requirements.txt     # Dependencies
+└── docs/                # Extended documentation
 ```
 
 ---
 
-## 🏆 Beat the Baseline
+## Graders
 
-| Task | Baseline | Target to beat |
+All graders are **deterministic and reproducible** — same seed → same score.
+
+```python
+from graders import easy_task_grader, medium_task_grader, hard_task_grader
+
+# Grade with agent actions
+actions = [[0,1,2,3,4]] * 10  # list of 10 steps, each 5 item IDs
+result = easy_task_grader(actions=actions)
+print(result["score"])   # float in [0.0, 1.0]
+print(result["success"]) # bool
+
+# Or grade via API
+GET /grade/easy_task  # runs self-play baseline
+```
+
+---
+
+## Baseline Scores (heuristic agent)
+
+| Task | Heuristic Score | Success Threshold |
 |---|---|---|
-| Easy (CTR) | 0.54 | > 0.65 |
-| Medium (Diversity) | 0.36 | > 0.45 |
-| Hard (LTV + Churn) | 0.51 | > 0.60 |
+| easy_task | ~0.54 | 0.25 |
+| medium_task | ~0.36 | 0.15 |
+| hard_task | ~0.51 | 0.20 |
 
-**Strategies:**
-- **Easy** → Pure popularity + preference matching
-- **Medium** → Force genre rotation every 2-3 steps
-- **Hard** → Track churn risk trend; lower fatigue before it spikes
-
----
-
-## 📄 License
-
-MIT — free to use, fork, and build on.
-
----
-
-*Built for Meta × PyTorch OpenEnv Hackathon 2026 · Environment v1.0.0*
+Scores above the threshold indicate the agent outperforms a popularity-based heuristic.
