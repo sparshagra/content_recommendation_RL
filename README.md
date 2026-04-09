@@ -1,3 +1,18 @@
+---
+title: Content Recommendation OpenEnv
+emoji: 🎯
+colorFrom: purple
+colorTo: blue
+sdk: docker
+pinned: false
+license: mit
+tags:
+  - reinforcement-learning
+  - openenv
+  - recommendation
+  - fastapi
+---
+
 # Content Recommendation OpenEnv
 
 > **Meta × PyTorch OpenEnv Hackathon 2026** — A production-quality RL environment for content recommendation.
